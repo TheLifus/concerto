@@ -1,5 +1,7 @@
 use crate::composer::package_path_parts;
 
+const NO_MATCHING_VERSION: &str = "Packagist metadata does not contain a version matching";
+
 pub struct PackagistRelease {
     pub version_count: usize,
     pub version: String,
@@ -17,6 +19,7 @@ pub fn package_url(package_name: &str) -> Result<String, String> {
 pub fn first_release_candidate(
     metadata_json: &str,
     package_name: &str,
+    constraint: &str,
 ) -> Result<PackagistRelease, String> {
     let parsed: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|error| format!("Invalid Packagist metadata: {error}"))?;
@@ -29,9 +32,17 @@ pub fn first_release_candidate(
             format!("Packagist metadata does not contain versions for {package_name}")
         })?;
 
-    let first = versions.first().ok_or_else(|| {
-        format!("Packagist metadata does not contain a version for {package_name}")
-    })?;
+    let first = versions
+        .iter()
+        .find(|version| {
+            version
+                .get("version")
+                .and_then(|version| version.as_str())
+                .is_some_and(|version| {
+                    semver_php::Semver::satisfies(version, constraint).unwrap_or(false)
+                })
+        })
+        .ok_or_else(|| no_matching_version_error(package_name, constraint))?;
 
     let version = first
         .get("version")
@@ -53,6 +64,10 @@ pub fn first_release_candidate(
         version: version.to_string(),
         dist_url: dist_url.to_string(),
     })
+}
+
+fn no_matching_version_error(package_name: &str, constraint: &str) -> String {
+    format!("{NO_MATCHING_VERSION} {constraint} for {package_name}")
 }
 
 #[cfg(test)]
@@ -89,7 +104,7 @@ mod tests {
         }
         "#;
 
-        let release = first_release_candidate(metadata_json, "monolog/monolog").unwrap();
+        let release = first_release_candidate(metadata_json, "monolog/monolog", "^3.0").unwrap();
 
         assert_eq!(release.version_count, 2);
         assert_eq!(release.version, "3.9.0");
@@ -97,5 +112,41 @@ mod tests {
             release.dist_url,
             "https://api.github.com/repos/Seldaek/monolog/zipball/abc123"
         );
+    }
+
+    #[test]
+    fn semver_php_matches_composer_constraints() {
+        assert!(semver_php::Semver::satisfies("3.10.0", "^3.0").unwrap());
+        assert!(semver_php::Semver::satisfies("3.0.2", "^3.0").unwrap());
+        assert!(!semver_php::Semver::satisfies("2.9.0", "^3.0").unwrap());
+    }
+
+    #[test]
+    fn skips_releases_that_do_not_match_constraint() {
+        let metadata_json = r#"
+    {
+        "packages": {
+            "monolog/monolog": [
+                {
+                    "version": "2.9.0",
+                    "dist": {
+                        "url": "https://example.com/2.9.0.zip"
+                    }
+                },
+                {
+                    "version": "3.8.1",
+                    "dist": {
+                        "url": "https://example.com/3.8.1.zip"
+                    }
+                }
+            ]
+        }
+    }
+    "#;
+
+        let release = first_release_candidate(metadata_json, "monolog/monolog", "^3.0").unwrap();
+
+        assert_eq!(release.version, "3.8.1");
+        assert_eq!(release.dist_url, "https://example.com/3.8.1.zip");
     }
 }

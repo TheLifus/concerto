@@ -52,7 +52,8 @@ fn install_package(package: &RequiredPackage) -> Result<(), String> {
     let metadata = get_text(&metadata_url)?;
     println!("Fetched {} bytes", metadata.len());
 
-    let release = packagist::first_release_candidate(&metadata, &package.name)?;
+    let release =
+        packagist::first_release_candidate(&metadata, &package.name, &package.constraint)?;
     print_release(&release);
 
     let source = download_and_extract(&release, &paths)?;
