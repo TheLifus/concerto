@@ -1,18 +1,33 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::composer::{RequiredPackage, package_path_parts, required_packages};
 use crate::http::{download_bytes, get_text};
 use crate::packagist::{self, PackagistRelease};
 
+pub(crate) const NO_COMPOSER_JSON: &str = "No composer.json found";
+
 struct PackagePaths {
     vendor_link: PathBuf,
     zip: PathBuf,
     extract: PathBuf,
 }
+struct ResolvedPackageVersion {
+    version: String,
+    constraints: Vec<String>,
+}
+
+struct ResolvedPackage {
+    release: PackagistRelease,
+    metadata_url: String,
+}
+
+type PackageConstraints = HashMap<String, Vec<String>>;
+type ResolvedPackages = HashMap<String, ResolvedPackageVersion>;
 
 pub fn install() -> Result<(), String> {
-    let content = std::fs::read_to_string("composer.json")
-        .map_err(|_| "No composer.json found".to_string())?;
+    let content =
+        std::fs::read_to_string("composer.json").map_err(|_| NO_COMPOSER_JSON.to_string())?;
 
     let packages = required_packages(&content)?;
 
@@ -22,11 +37,42 @@ pub fn install() -> Result<(), String> {
     std::fs::create_dir_all("vendor")
         .map_err(|error| format!("Could not create vendor directory: {error}"))?;
 
+    let mut package_constraints = PackageConstraints::new();
+
+    for package in &packages {
+        add_package_constraint(&mut package_constraints, package);
+    }
+
+    let mut resolved_packages = ResolvedPackages::new();
+
     for package in packages {
-        install_package(&package)?;
+        install_package(&package, &mut package_constraints, &mut resolved_packages)?;
     }
 
     Ok(())
+}
+
+fn add_package_constraint(package_constraints: &mut PackageConstraints, package: &RequiredPackage) {
+    package_constraints
+        .entry(package.name.clone())
+        .or_default()
+        .push(package.constraint.clone());
+}
+
+fn resolve_package(
+    package: &RequiredPackage,
+    constraints: &[String],
+) -> Result<ResolvedPackage, String> {
+    let metadata_url = packagist::package_url(&package.name)?;
+    let metadata = get_text(&metadata_url)?;
+    println!("Fetched {} bytes", metadata.len());
+
+    let release = packagist::first_release_candidate(&metadata, &package.name, constraints)?;
+
+    Ok(ResolvedPackage {
+        release,
+        metadata_url,
+    })
 }
 
 fn only_child_dir(path: &Path) -> Result<PathBuf, String> {
@@ -46,19 +92,76 @@ fn only_child_dir(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn install_package(package: &RequiredPackage) -> Result<(), String> {
+fn install_package(
+    package: &RequiredPackage,
+    package_constraints: &mut PackageConstraints,
+    resolved_packages: &mut ResolvedPackages,
+) -> Result<(), String> {
+    if let Some(resolved_package) = resolved_packages.get(&package.name) {
+        return ensure_resolved_package_matches(package, resolved_package);
+    }
+
+    let constraints = package_constraints
+        .get(&package.name)
+        .ok_or_else(|| format!("Missing constraints for {}", package.name))?;
+    let resolved = resolve_package(package, constraints)?;
+
+    resolved_packages.insert(
+        package.name.clone(),
+        ResolvedPackageVersion {
+            version: resolved.release.version.clone(),
+            constraints: constraints.clone(),
+        },
+    );
+
+    install_resolved_package(package, &resolved)?;
+
+    for requirement in &resolved.release.package_requires {
+        add_package_constraint(package_constraints, requirement);
+        install_package(requirement, package_constraints, resolved_packages)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_resolved_package_matches(
+    package: &RequiredPackage,
+    resolved_package: &ResolvedPackageVersion,
+) -> Result<(), String> {
+    let satisfies =
+        semver_php::Semver::satisfies(&resolved_package.version, &package.constraint)
+            .map_err(|error| format!("Could not check installed package constraint: {error}"))?;
+
+    if satisfies {
+        println!(
+            "Skipping already installed {} {}",
+            package.name, resolved_package.version
+        );
+
+        return Ok(());
+    }
+
+    Err(format!(
+        "Version conflict for {}: resolved {} from {}, but requested {}",
+        package.name,
+        resolved_package.version,
+        resolved_package.constraints.join(", "),
+        package.constraint
+    ))
+}
+
+fn install_resolved_package(
+    package: &RequiredPackage,
+    resolved: &ResolvedPackage,
+) -> Result<(), String> {
     let paths = package_paths(package)?;
-    let metadata_url = packagist::package_url(&package.name)?;
-    let metadata = get_text(&metadata_url)?;
-    println!("Fetched {} bytes", metadata.len());
 
-    let release =
-        packagist::first_release_candidate(&metadata, &package.name, &package.constraint)?;
-    print_release(&release);
+    print_release(&resolved.release);
+    print_requirements(&resolved.release);
 
-    let source = download_and_extract(&release, &paths)?;
+    let source = download_and_extract(&resolved.release, &paths)?;
     link_vendor_package(&paths.vendor_link, &source)?;
-    print_install_summary(package, &source, &metadata_url);
+    print_install_summary(package, &source, &resolved.metadata_url);
 
     Ok(())
 }
@@ -129,7 +232,28 @@ fn link_vendor_package(vendor_link: &Path, source: &Path) -> Result<(), String> 
 fn print_release(release: &PackagistRelease) {
     println!("Found {} versions", release.version_count);
     println!("Selected {}", release.version);
+    println!("Requires {} packages", release.package_requires.len());
+    println!(
+        "Requires {} platform packages",
+        release.platform_requires.len()
+    );
     println!("Dist {}", release.dist_url);
+}
+
+fn print_requirements(release: &PackagistRelease) {
+    for requirement in &release.package_requires {
+        println!(
+            "Package requirement: {} {}",
+            requirement.name, requirement.constraint
+        );
+    }
+
+    for requirement in &release.platform_requires {
+        println!(
+            "Platform requirement: {} {}",
+            requirement.name, requirement.constraint
+        );
+    }
 }
 
 fn print_install_summary(package: &RequiredPackage, source: &Path, metadata_url: &str) {

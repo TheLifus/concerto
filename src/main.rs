@@ -12,6 +12,8 @@ mod http;
 mod installer;
 mod packagist;
 
+pub(crate) const USAGE: &str = "Usage: concerto install";
+
 enum Command {
     Install,
     Help,
@@ -39,7 +41,7 @@ fn parse_command(argument: Option<String>) -> Command {
 }
 
 fn print_help() {
-    println!("Usage: concerto install");
+    println!("{USAGE}");
 }
 
 #[cfg(test)]
