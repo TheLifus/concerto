@@ -12,6 +12,7 @@ mod http;
 mod installer;
 mod lockfile;
 mod packagist;
+mod perf;
 
 pub(crate) const USAGE: &str = "Usage: concerto install";
 

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::composer::{RequiredPackage, package_path_parts, required_packages};
 use crate::http::{download_bytes, get_text};
 use crate::packagist::{self, PackagistRelease};
+use crate::perf::PerfLogger;
+use std::time::Instant;
 
 pub(crate) const NO_COMPOSER_JSON: &str = "No composer.json found";
 
@@ -30,6 +32,8 @@ type PackageConstraints = HashMap<String, Vec<String>>;
 type ResolvedPackages = HashMap<String, ResolvedPackageEntry>;
 
 pub fn install() -> Result<(), String> {
+    let perf = PerfLogger::from_env()?;
+    let install_started_at = Instant::now();
     let content =
         std::fs::read_to_string("composer.json").map_err(|_| NO_COMPOSER_JSON.to_string())?;
 
@@ -50,11 +54,20 @@ pub fn install() -> Result<(), String> {
     let mut resolved_packages = ResolvedPackages::new();
 
     for package in packages {
-        install_package(&package, &mut package_constraints, &mut resolved_packages)?;
+        install_package(
+            &package,
+            &mut package_constraints,
+            &mut resolved_packages,
+            &perf,
+        )?;
     }
 
+    let package_count = resolved_packages.len();
     let lockfile = build_lockfile(resolved_packages);
+    let lockfile_started_at = Instant::now();
     lockfile::write(&lockfile)?;
+    perf.log("lockfile_write", lockfile_started_at.elapsed(), &[])?;
+    perf.finish_run(install_started_at.elapsed(), package_count)?;
 
     Ok(())
 }
@@ -69,12 +82,22 @@ fn add_package_constraint(package_constraints: &mut PackageConstraints, package:
 fn resolve_package(
     package: &RequiredPackage,
     constraints: &[String],
+    perf: &PerfLogger,
 ) -> Result<ResolvedPackage, String> {
+    let started_at = Instant::now();
     let metadata_url = packagist::package_url(&package.name)?;
     let metadata = get_text(&metadata_url)?;
     println!("Fetched {} bytes", metadata.len());
 
     let release = packagist::first_release_candidate(&metadata, &package.name, constraints)?;
+    perf.log(
+        "resolve_package",
+        started_at.elapsed(),
+        &[
+            ("package", package.name.clone()),
+            ("version", release.version.clone()),
+        ],
+    )?;
 
     Ok(ResolvedPackage {
         release,
@@ -103,6 +126,7 @@ fn install_package(
     package: &RequiredPackage,
     package_constraints: &mut PackageConstraints,
     resolved_packages: &mut ResolvedPackages,
+    perf: &PerfLogger,
 ) -> Result<(), String> {
     if let Some(resolved_package) = resolved_packages.get(&package.name) {
         return ensure_resolved_package_matches(package, resolved_package);
@@ -111,7 +135,7 @@ fn install_package(
     let constraints = package_constraints
         .get(&package.name)
         .ok_or_else(|| format!("Missing constraints for {}", package.name))?;
-    let resolved = resolve_package(package, constraints)?;
+    let resolved = resolve_package(package, constraints, perf)?;
 
     resolved_packages.insert(
         package.name.clone(),
@@ -124,11 +148,11 @@ fn install_package(
         },
     );
 
-    install_resolved_package(package, &resolved)?;
+    install_resolved_package(package, &resolved, perf)?;
 
     for requirement in &resolved.release.package_requires {
         add_package_constraint(package_constraints, requirement);
-        install_package(requirement, package_constraints, resolved_packages)?;
+        install_package(requirement, package_constraints, resolved_packages, perf)?;
     }
 
     Ok(())
@@ -163,6 +187,7 @@ fn ensure_resolved_package_matches(
 fn install_resolved_package(
     package: &RequiredPackage,
     resolved: &ResolvedPackage,
+    perf: &PerfLogger,
 ) -> Result<(), String> {
     let paths = package_paths(package, &resolved.release.version)?;
 
@@ -171,12 +196,33 @@ fn install_resolved_package(
 
     let source = match existing_source(&paths)? {
         Some(source) => {
+            let started_at = Instant::now();
             println!("Reusing {}", source.display());
+            perf.log(
+                "source_reuse",
+                started_at.elapsed(),
+                &[("package", package.name.clone())],
+            )?;
             source
         }
-        None => download_and_extract(&resolved.release, &paths)?,
+        None => {
+            let started_at = Instant::now();
+            let source = download_and_extract(&resolved.release, &paths)?;
+            perf.log(
+                "source_download_extract",
+                started_at.elapsed(),
+                &[("package", package.name.clone())],
+            )?;
+            source
+        }
     };
+    let link_started_at = Instant::now();
     link_vendor_package(&paths.vendor_link, &source)?;
+    perf.log(
+        "vendor_link",
+        link_started_at.elapsed(),
+        &[("package", package.name.clone())],
+    )?;
     print_install_summary(package, &source, &resolved.metadata_url);
 
     Ok(())
