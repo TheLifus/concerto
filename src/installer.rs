@@ -154,21 +154,30 @@ fn install_resolved_package(
     package: &RequiredPackage,
     resolved: &ResolvedPackage,
 ) -> Result<(), String> {
-    let paths = package_paths(package)?;
+    let paths = package_paths(package, &resolved.release.version)?;
 
     print_release(&resolved.release);
     print_requirements(&resolved.release);
 
-    let source = download_and_extract(&resolved.release, &paths)?;
+    let source = match existing_source(&paths)? {
+        Some(source) => {
+            println!("Reusing {}", source.display());
+            source
+        }
+        None => download_and_extract(&resolved.release, &paths)?,
+    };
     link_vendor_package(&paths.vendor_link, &source)?;
     print_install_summary(package, &source, &resolved.metadata_url);
 
     Ok(())
 }
 
-fn package_paths(package: &RequiredPackage) -> Result<PackagePaths, String> {
+fn package_paths(package: &RequiredPackage, version: &str) -> Result<PackagePaths, String> {
     let (vendor, name) = package_path_parts(&package.name)?;
-    let store = PathBuf::from(".concerto/store").join(vendor).join(name);
+    let store = PathBuf::from(".concerto/store")
+        .join(vendor)
+        .join(name)
+        .join(version);
     let vendor_parent = PathBuf::from("vendor").join(vendor);
     let vendor_link = vendor_parent.join(name);
 
@@ -185,6 +194,14 @@ fn package_paths(package: &RequiredPackage) -> Result<PackagePaths, String> {
         extract: store.join("source"),
         vendor_link,
     })
+}
+
+fn existing_source(paths: &PackagePaths) -> Result<Option<PathBuf>, String> {
+    if !paths.extract.exists() {
+        return Ok(None);
+    }
+
+    only_child_dir(&paths.extract).map(Some)
 }
 
 fn download_and_extract(
