@@ -3,7 +3,7 @@ pub(crate) const REQUIRE_MUST_BE_OBJECT: &str = "composer.json require must be a
 const INVALID_COMPOSER_JSON: &str = "Invalid composer.json";
 const INVALID_PACKAGE_NAME: &str = "Invalid package name";
 
-#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RequiredPackage {
     pub name: String,
     pub constraint: String,

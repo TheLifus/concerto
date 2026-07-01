@@ -11,6 +11,7 @@ mod composer;
 mod http;
 mod installer;
 mod lockfile;
+mod package_store;
 mod packagist;
 mod perf;
 

@@ -1,20 +1,16 @@
 use crate::lockfile::{self, LockedPackage, Lockfile};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::composer::{RequiredPackage, package_path_parts, required_packages};
-use crate::http::{download_bytes, get_text};
+use crate::composer::{RequiredPackage, required_packages};
+use crate::http::get_text;
+use crate::package_store::{self, PackageArchive};
 use crate::packagist::{self, PackagistRelease};
 use crate::perf::PerfLogger;
 use std::time::Instant;
 
 pub(crate) const NO_COMPOSER_JSON: &str = "No composer.json found";
 
-struct PackagePaths {
-    vendor_link: PathBuf,
-    zip: PathBuf,
-    extract: PathBuf,
-}
 struct ResolvedPackageEntry {
     version: String,
     dist_url: String,
@@ -39,6 +35,32 @@ pub fn install() -> Result<(), String> {
 
     let packages = required_packages(&content)?;
 
+    if let Some(lockfile) = lockfile::read()? {
+        if lockfile::matches_root_requirements(&lockfile, &packages) {
+            println!(
+                "Installing from lockfile with {} packages",
+                lockfile.packages.len()
+            );
+
+            let lockfile_started_at = Instant::now();
+
+            for package in &lockfile.packages {
+                install_locked_package(package, &perf)?;
+            }
+
+            perf.log(
+                "lockfile_install",
+                lockfile_started_at.elapsed(),
+                &[("packages", lockfile.packages.len().to_string())],
+            )?;
+            perf.finish_run(install_started_at.elapsed(), lockfile.packages.len())?;
+
+            return Ok(());
+        }
+
+        println!("Ignoring outdated lockfile");
+    }
+
     std::fs::create_dir_all(".concerto/store")
         .map_err(|error| format!("Could not create local store: {error}"))?;
 
@@ -53,9 +75,9 @@ pub fn install() -> Result<(), String> {
 
     let mut resolved_packages = ResolvedPackages::new();
 
-    for package in packages {
+    for package in &packages {
         install_package(
-            &package,
+            package,
             &mut package_constraints,
             &mut resolved_packages,
             &perf,
@@ -63,7 +85,7 @@ pub fn install() -> Result<(), String> {
     }
 
     let package_count = resolved_packages.len();
-    let lockfile = build_lockfile(resolved_packages);
+    let lockfile = build_lockfile(packages, resolved_packages);
     let lockfile_started_at = Instant::now();
     lockfile::write(&lockfile)?;
     perf.log("lockfile_write", lockfile_started_at.elapsed(), &[])?;
@@ -103,23 +125,6 @@ fn resolve_package(
         release,
         metadata_url,
     })
-}
-
-fn only_child_dir(path: &Path) -> Result<PathBuf, String> {
-    let dirs = std::fs::read_dir(path)
-        .map_err(|error| format!("Could not read extracted package directory: {error}"))?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-
-    match dirs.as_slice() {
-        [dir] => Ok(dir.clone()),
-        _ => Err(format!(
-            "Expected exactly one extracted directory in {}",
-            path.display()
-        )),
-    }
 }
 
 fn install_package(
@@ -189,117 +194,77 @@ fn install_resolved_package(
     resolved: &ResolvedPackage,
     perf: &PerfLogger,
 ) -> Result<(), String> {
-    let paths = package_paths(package, &resolved.release.version)?;
-
     print_release(&resolved.release);
     print_requirements(&resolved.release);
 
-    let source = match existing_source(&paths)? {
-        Some(source) => {
-            let started_at = Instant::now();
-            println!("Reusing {}", source.display());
-            perf.log(
-                "source_reuse",
-                started_at.elapsed(),
-                &[("package", package.name.clone())],
-            )?;
-            source
-        }
-        None => {
-            let started_at = Instant::now();
-            let source = download_and_extract(&resolved.release, &paths)?;
-            perf.log(
-                "source_download_extract",
-                started_at.elapsed(),
-                &[("package", package.name.clone())],
-            )?;
-            source
-        }
+    let source_started_at = Instant::now();
+    let archive = PackageArchive {
+        version: &resolved.release.version,
+        dist_url: &resolved.release.dist_url,
     };
+
+    let source = package_store::prepare_source(&package.name, archive)?;
+    let source_event = if source.is_reused() {
+        println!("Reusing {}", source.path().display());
+        "source_reuse"
+    } else {
+        "source_download_extract"
+    };
+    perf.log(
+        source_event,
+        source_started_at.elapsed(),
+        &[("package", package.name.clone())],
+    )?;
+
     let link_started_at = Instant::now();
-    link_vendor_package(&paths.vendor_link, &source)?;
+    package_store::link_to_vendor(&source)?;
     perf.log(
         "vendor_link",
         link_started_at.elapsed(),
         &[("package", package.name.clone())],
     )?;
-    print_install_summary(package, &source, &resolved.metadata_url);
+    print_install_summary(package, source.path(), &resolved.metadata_url);
 
     Ok(())
 }
 
-fn package_paths(package: &RequiredPackage, version: &str) -> Result<PackagePaths, String> {
-    let (vendor, name) = package_path_parts(&package.name)?;
-    let store = PathBuf::from(".concerto/store")
-        .join(vendor)
-        .join(name)
-        .join(version);
-    let vendor_parent = PathBuf::from("vendor").join(vendor);
-    let vendor_link = vendor_parent.join(name);
+fn install_locked_package(package: &LockedPackage, perf: &PerfLogger) -> Result<(), String> {
+    let archive = PackageArchive {
+        version: &package.version,
+        dist_url: &package.dist_url,
+    };
 
-    std::fs::create_dir_all(&store)
-        .map_err(|error| format!("Could not create package store directory: {error}"))?;
-    std::fs::create_dir_all(&vendor_parent)
-        .map_err(|error| format!("Could not create vendor directory: {error}"))?;
+    let source_started_at = Instant::now();
+    let source = package_store::prepare_source(&package.name, archive)?;
+    let source_event = if source.is_reused() {
+        println!("Reusing {}", source.path().display());
+        "source_reuse"
+    } else {
+        "source_download_extract"
+    };
 
-    let store = std::fs::canonicalize(&store)
-        .map_err(|error| format!("Could not resolve package store directory: {error}"))?;
+    perf.log(
+        source_event,
+        source_started_at.elapsed(),
+        &[("package", package.name.clone())],
+    )?;
 
-    Ok(PackagePaths {
-        zip: store.join("package.zip"),
-        extract: store.join("source"),
-        vendor_link,
-    })
-}
+    let link_started_at = Instant::now();
+    package_store::link_to_vendor(&source)?;
+    perf.log(
+        "vendor_link",
+        link_started_at.elapsed(),
+        &[("package", package.name.clone())],
+    )?;
 
-fn existing_source(paths: &PackagePaths) -> Result<Option<PathBuf>, String> {
-    if !paths.extract.exists() {
-        return Ok(None);
-    }
+    println!(
+        "{} {} -> {}",
+        package.name,
+        package.version,
+        source.path().display()
+    );
 
-    only_child_dir(&paths.extract).map(Some)
-}
-
-fn download_and_extract(
-    release: &PackagistRelease,
-    paths: &PackagePaths,
-) -> Result<PathBuf, String> {
-    let zip = download_bytes(&release.dist_url)?;
-
-    std::fs::write(&paths.zip, zip)
-        .map_err(|error| format!("Could not write package zip: {error}"))?;
-    println!("Downloaded {}", paths.zip.display());
-
-    if paths.extract.exists() {
-        std::fs::remove_dir_all(&paths.extract)
-            .map_err(|error| format!("Could not clean package source directory: {error}"))?;
-    }
-
-    safe_unzip::extract_file(&paths.extract, &paths.zip)
-        .map_err(|error| format!("Could not extract package zip: {error}"))?;
-    println!("Extracted {}", paths.extract.display());
-
-    let source = only_child_dir(&paths.extract)?;
-    println!("Source {}", source.display());
-
-    Ok(source)
-}
-
-fn link_vendor_package(vendor_link: &Path, source: &Path) -> Result<(), String> {
-    if let Ok(metadata) = std::fs::symlink_metadata(vendor_link) {
-        if !metadata.file_type().is_symlink() {
-            return Err(format!(
-                "Vendor path already exists and is not a symlink: {}",
-                vendor_link.display()
-            ));
-        }
-
-        std::fs::remove_file(vendor_link)
-            .map_err(|error| format!("Could not remove existing vendor link: {error}"))?;
-    }
-
-    std::os::unix::fs::symlink(source, vendor_link)
-        .map_err(|error| format!("Could not link vendor package to source: {error}"))
+    Ok(())
 }
 
 fn print_release(release: &PackagistRelease) {
@@ -339,7 +304,10 @@ fn print_install_summary(package: &RequiredPackage, source: &Path, metadata_url:
     );
 }
 
-fn build_lockfile(resolved_packages: ResolvedPackages) -> Lockfile {
+fn build_lockfile(
+    root_requirements: Vec<RequiredPackage>,
+    resolved_packages: ResolvedPackages,
+) -> Lockfile {
     let mut packages = resolved_packages
         .into_iter()
         .map(|(name, package)| LockedPackage {
@@ -353,5 +321,8 @@ fn build_lockfile(resolved_packages: ResolvedPackages) -> Lockfile {
 
     packages.sort_by(|left, right| left.name.cmp(&right.name));
 
-    Lockfile { packages }
+    Lockfile {
+        root_requirements,
+        packages,
+    }
 }
