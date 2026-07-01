@@ -1,3 +1,4 @@
+use crate::lockfile::{self, LockedPackage, Lockfile};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -12,9 +13,12 @@ struct PackagePaths {
     zip: PathBuf,
     extract: PathBuf,
 }
-struct ResolvedPackageVersion {
+struct ResolvedPackageEntry {
     version: String,
+    dist_url: String,
     constraints: Vec<String>,
+    package_requires: Vec<RequiredPackage>,
+    platform_requires: Vec<RequiredPackage>,
 }
 
 struct ResolvedPackage {
@@ -23,7 +27,7 @@ struct ResolvedPackage {
 }
 
 type PackageConstraints = HashMap<String, Vec<String>>;
-type ResolvedPackages = HashMap<String, ResolvedPackageVersion>;
+type ResolvedPackages = HashMap<String, ResolvedPackageEntry>;
 
 pub fn install() -> Result<(), String> {
     let content =
@@ -48,6 +52,9 @@ pub fn install() -> Result<(), String> {
     for package in packages {
         install_package(&package, &mut package_constraints, &mut resolved_packages)?;
     }
+
+    let lockfile = build_lockfile(resolved_packages);
+    lockfile::write(&lockfile)?;
 
     Ok(())
 }
@@ -108,9 +115,12 @@ fn install_package(
 
     resolved_packages.insert(
         package.name.clone(),
-        ResolvedPackageVersion {
+        ResolvedPackageEntry {
             version: resolved.release.version.clone(),
+            dist_url: resolved.release.dist_url.clone(),
             constraints: constraints.clone(),
+            package_requires: resolved.release.package_requires.clone(),
+            platform_requires: resolved.release.platform_requires.clone(),
         },
     );
 
@@ -126,7 +136,7 @@ fn install_package(
 
 fn ensure_resolved_package_matches(
     package: &RequiredPackage,
-    resolved_package: &ResolvedPackageVersion,
+    resolved_package: &ResolvedPackageEntry,
 ) -> Result<(), String> {
     let satisfies =
         semver_php::Semver::satisfies(&resolved_package.version, &package.constraint)
@@ -281,4 +291,21 @@ fn print_install_summary(package: &RequiredPackage, source: &Path, metadata_url:
         source.display(),
         metadata_url
     );
+}
+
+fn build_lockfile(resolved_packages: ResolvedPackages) -> Lockfile {
+    let mut packages = resolved_packages
+        .into_iter()
+        .map(|(name, package)| LockedPackage {
+            name,
+            version: package.version,
+            dist_url: package.dist_url,
+            package_requires: package.package_requires,
+            platform_requires: package.platform_requires,
+        })
+        .collect::<Vec<_>>();
+
+    packages.sort_by(|left, right| left.name.cmp(&right.name));
+
+    Lockfile { packages }
 }

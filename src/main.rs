@@ -10,6 +10,7 @@ use std::env;
 mod composer;
 mod http;
 mod installer;
+mod lockfile;
 mod packagist;
 
 pub(crate) const USAGE: &str = "Usage: concerto install";
