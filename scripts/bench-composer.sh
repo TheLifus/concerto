@@ -5,6 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONCERTO="$ROOT/target/debug/concerto"
 WORKDIR="$(mktemp -d)"
 
+CASE_COUNT=0
+TOTAL_PACKAGES=0
+TOTAL_COMPOSER_COLD_MS=0
+TOTAL_COMPOSER_WARM_MS=0
+TOTAL_CONCERTO_COLD_MS=0
+TOTAL_CONCERTO_LOCK_MS=0
+TOTAL_CONCERTO_RELINK_MS=0
+
 trap 'rm -rf "$WORKDIR"' EXIT
 
 now_ms() {
@@ -62,6 +70,46 @@ package_count() {
     find "$project/vendor" -mindepth 2 -maxdepth 2 \( -type d -o -type l \) | wc -l | tr -d ' '
 }
 
+compare_time() {
+    local baseline_ms="$1"
+    local candidate_ms="$2"
+
+    awk -v baseline="$baseline_ms" -v candidate="$candidate_ms" '
+        BEGIN {
+            if (baseline < 1) {
+                baseline = 1
+            }
+
+            if (candidate < 1) {
+                candidate = 1
+            }
+
+            if (candidate <= baseline) {
+                printf "%.1fx faster", baseline / candidate
+            } else {
+                printf "%.1fx slower", candidate / baseline
+            }
+        }
+    '
+}
+
+track_case() {
+    local packages="$1"
+    local composer_cold_ms="$2"
+    local composer_warm_ms="$3"
+    local concerto_cold_ms="$4"
+    local concerto_lock_ms="$5"
+    local concerto_relink_ms="$6"
+
+    CASE_COUNT=$((CASE_COUNT + 1))
+    TOTAL_PACKAGES=$((TOTAL_PACKAGES + packages))
+    TOTAL_COMPOSER_COLD_MS=$((TOTAL_COMPOSER_COLD_MS + composer_cold_ms))
+    TOTAL_COMPOSER_WARM_MS=$((TOTAL_COMPOSER_WARM_MS + composer_warm_ms))
+    TOTAL_CONCERTO_COLD_MS=$((TOTAL_CONCERTO_COLD_MS + concerto_cold_ms))
+    TOTAL_CONCERTO_LOCK_MS=$((TOTAL_CONCERTO_LOCK_MS + concerto_lock_ms))
+    TOTAL_CONCERTO_RELINK_MS=$((TOTAL_CONCERTO_RELINK_MS + concerto_relink_ms))
+}
+
 bench_case() {
     local name="$1"
     local json="$2"
@@ -77,8 +125,8 @@ bench_case() {
     local concerto_lock_ms
     local concerto_relink_ms
     local packages
-    local lock_divisor
-    local lock_speedup
+    local cold_result
+    local lock_result
 
     composer_cold_ms="$(timed composer_install "$composer_project")"
     composer_warm_ms="$(timed composer_install "$composer_project")"
@@ -88,15 +136,18 @@ bench_case() {
     rm -rf "$concerto_project/vendor"
     concerto_relink_ms="$(timed concerto_install "$concerto_project")"
     packages="$(package_count "$concerto_project")"
-    lock_divisor="$concerto_lock_ms"
+    cold_result="$(compare_time "$composer_cold_ms" "$concerto_cold_ms")"
+    lock_result="$(compare_time "$composer_warm_ms" "$concerto_lock_ms")"
 
-    if [ "$lock_divisor" -lt 1 ]; then
-        lock_divisor=1
-    fi
+    track_case \
+        "$packages" \
+        "$composer_cold_ms" \
+        "$composer_warm_ms" \
+        "$concerto_cold_ms" \
+        "$concerto_lock_ms" \
+        "$concerto_relink_ms"
 
-    lock_speedup=$((composer_warm_ms / lock_divisor))
-
-    printf '%-11s %8s %13s %13s %13s %13s %15s %9sx\n' \
+    printf '%-16s %8s %13s %13s %13s %13s %15s %-14s %-14s\n' \
         "$name" \
         "$packages" \
         "$composer_cold_ms" \
@@ -104,7 +155,42 @@ bench_case() {
         "$concerto_cold_ms" \
         "$concerto_lock_ms" \
         "$concerto_relink_ms" \
-        "$lock_speedup"
+        "$cold_result" \
+        "$lock_result"
+}
+
+average() {
+    local total="$1"
+
+    echo $((total / CASE_COUNT))
+}
+
+print_summary() {
+    local avg_packages
+    local avg_composer_cold
+    local avg_composer_warm
+    local avg_concerto_cold
+    local avg_concerto_lock
+    local avg_concerto_relink
+
+    avg_packages="$(average "$TOTAL_PACKAGES")"
+    avg_composer_cold="$(average "$TOTAL_COMPOSER_COLD_MS")"
+    avg_composer_warm="$(average "$TOTAL_COMPOSER_WARM_MS")"
+    avg_concerto_cold="$(average "$TOTAL_CONCERTO_COLD_MS")"
+    avg_concerto_lock="$(average "$TOTAL_CONCERTO_LOCK_MS")"
+    avg_concerto_relink="$(average "$TOTAL_CONCERTO_RELINK_MS")"
+
+    echo
+    echo "Average over $CASE_COUNT cases ($avg_packages packages average):"
+    printf '  Cold install: Concerto is %s than Composer (%sms vs %sms).\n' \
+        "$(compare_time "$avg_composer_cold" "$avg_concerto_cold")" \
+        "$avg_concerto_cold" \
+        "$avg_composer_cold"
+    printf '  Lock install: Concerto is %s than Composer warm (%sms vs %sms).\n' \
+        "$(compare_time "$avg_composer_warm" "$avg_concerto_lock")" \
+        "$avg_concerto_lock" \
+        "$avg_composer_warm"
+    printf '  Vendor relink: Concerto averages %sms.\n' "$avg_concerto_relink"
 }
 
 command -v docker >/dev/null || {
@@ -116,7 +202,7 @@ cargo build --quiet --manifest-path "$ROOT/Cargo.toml"
 docker image inspect composer:2 >/dev/null 2>&1 || docker pull composer:2 >/dev/null 2>&1
 
 echo "Composer runs with --ignore-platform-reqs because Concerto does not enforce platform yet."
-printf '%-11s %8s %13s %13s %13s %13s %15s %10s\n' \
+printf '%-16s %8s %13s %13s %13s %13s %15s %-14s %-14s\n' \
     "case" \
     "packages" \
     "composer_cold" \
@@ -124,11 +210,12 @@ printf '%-11s %8s %13s %13s %13s %13s %15s %10s\n' \
     "concerto_cold" \
     "concerto_lock" \
     "concerto_relink" \
-    "warm_gain"
+    "cold_result" \
+    "lock_result"
 
 bench_case "direct" '{"require":{"psr/log":"^3.0"}}'
 bench_case "transitive" '{"require":{"monolog/monolog":"^3.0"}}'
-bench_case "multi" '{
+bench_case "multi-app" '{
   "require": {
     "monolog/monolog": "^3.0",
     "symfony/console": "^8.0",
@@ -137,3 +224,32 @@ bench_case "multi" '{
     "league/flysystem": "^3.0"
   }
 }'
+bench_case "multi-symfony" '{
+  "require": {
+    "symfony/console": "^7.0",
+    "symfony/filesystem": "^7.0",
+    "symfony/finder": "^7.0",
+    "symfony/process": "^7.0",
+    "symfony/yaml": "^7.0"
+  }
+}'
+bench_case "multi-utils" '{
+  "require": {
+    "brick/math": "^0.14",
+    "nesbot/carbon": "^3.0",
+    "ramsey/uuid": "^4.0",
+    "symfony/string": "^7.0",
+    "vlucas/phpdotenv": "^5.6"
+  }
+}'
+bench_case "multi-http" '{
+  "require": {
+    "guzzlehttp/guzzle": "^7.0",
+    "nyholm/psr7": "^1.8",
+    "psr/http-client": "^1.0",
+    "psr/http-factory": "^1.0",
+    "symfony/http-client": "^7.0"
+  }
+}'
+
+print_summary

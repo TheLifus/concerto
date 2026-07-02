@@ -14,6 +14,7 @@ mod lockfile;
 mod package_store;
 mod packagist;
 mod perf;
+mod resolver;
 
 pub(crate) const USAGE: &str = "Usage: concerto install";
 

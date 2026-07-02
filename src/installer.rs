@@ -1,31 +1,22 @@
 use crate::lockfile::{self, LockedPackage, Lockfile};
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::composer::{RequiredPackage, required_packages};
-use crate::http::get_text;
 use crate::package_store::{self, PackageArchive};
-use crate::packagist::{self, PackagistRelease};
 use crate::perf::PerfLogger;
-use std::time::Instant;
+use crate::resolver::{self, ResolvedPackageEntry, ResolvedPackages};
+use std::time::{Duration, Instant};
 
 pub(crate) const NO_COMPOSER_JSON: &str = "No composer.json found";
 
-struct ResolvedPackageEntry {
-    version: String,
-    dist_url: String,
-    constraints: Vec<String>,
-    package_requires: Vec<RequiredPackage>,
-    platform_requires: Vec<RequiredPackage>,
-}
-
-struct ResolvedPackage {
-    release: PackagistRelease,
+struct PreparedPackage {
+    name: String,
+    constraint: String,
     metadata_url: String,
+    source: package_store::PackageSource,
+    source_duration: Duration,
+    source_event: &'static str,
 }
-
-type PackageConstraints = HashMap<String, Vec<String>>;
-type ResolvedPackages = HashMap<String, ResolvedPackageEntry>;
 
 pub fn install() -> Result<(), String> {
     let perf = PerfLogger::from_env()?;
@@ -67,24 +58,10 @@ pub fn install() -> Result<(), String> {
     std::fs::create_dir_all("vendor")
         .map_err(|error| format!("Could not create vendor directory: {error}"))?;
 
-    let mut package_constraints = PackageConstraints::new();
-
-    for package in &packages {
-        add_package_constraint(&mut package_constraints, package);
-    }
-
-    let mut resolved_packages = ResolvedPackages::new();
-
-    for package in &packages {
-        install_package(
-            package,
-            &mut package_constraints,
-            &mut resolved_packages,
-            &perf,
-        )?;
-    }
-
+    let resolved_packages = resolver::resolve(&packages, &perf)?;
     let package_count = resolved_packages.len();
+    install_resolved_packages(&resolved_packages, &perf)?;
+
     let lockfile = build_lockfile(packages, resolved_packages);
     let lockfile_started_at = Instant::now();
     lockfile::write(&lockfile)?;
@@ -94,138 +71,101 @@ pub fn install() -> Result<(), String> {
     Ok(())
 }
 
-fn add_package_constraint(package_constraints: &mut PackageConstraints, package: &RequiredPackage) {
-    package_constraints
-        .entry(package.name.clone())
-        .or_default()
-        .push(package.constraint.clone());
-}
-
-fn resolve_package(
-    package: &RequiredPackage,
-    constraints: &[String],
-    perf: &PerfLogger,
-) -> Result<ResolvedPackage, String> {
-    let started_at = Instant::now();
-    let metadata_url = packagist::package_url(&package.name)?;
-    let metadata = get_text(&metadata_url)?;
-    println!("Fetched {} bytes", metadata.len());
-
-    let release = packagist::first_release_candidate(&metadata, &package.name, constraints)?;
-    perf.log(
-        "resolve_package",
-        started_at.elapsed(),
-        &[
-            ("package", package.name.clone()),
-            ("version", release.version.clone()),
-        ],
-    )?;
-
-    Ok(ResolvedPackage {
-        release,
-        metadata_url,
-    })
-}
-
-fn install_package(
-    package: &RequiredPackage,
-    package_constraints: &mut PackageConstraints,
-    resolved_packages: &mut ResolvedPackages,
+fn install_resolved_packages(
+    resolved_packages: &ResolvedPackages,
     perf: &PerfLogger,
 ) -> Result<(), String> {
-    if let Some(resolved_package) = resolved_packages.get(&package.name) {
-        return ensure_resolved_package_matches(package, resolved_package);
-    }
+    let prepare_started_at = Instant::now();
+    let prepared_packages = prepare_resolved_sources(resolved_packages)?;
 
-    let constraints = package_constraints
-        .get(&package.name)
-        .ok_or_else(|| format!("Missing constraints for {}", package.name))?;
-    let resolved = resolve_package(package, constraints, perf)?;
+    perf.log(
+        "sources_prepare",
+        prepare_started_at.elapsed(),
+        &[("packages", prepared_packages.len().to_string())],
+    )?;
 
-    resolved_packages.insert(
-        package.name.clone(),
-        ResolvedPackageEntry {
-            version: resolved.release.version.clone(),
-            dist_url: resolved.release.dist_url.clone(),
-            constraints: constraints.clone(),
-            package_requires: resolved.release.package_requires.clone(),
-            platform_requires: resolved.release.platform_requires.clone(),
-        },
-    );
-
-    install_resolved_package(package, &resolved, perf)?;
-
-    for requirement in &resolved.release.package_requires {
-        add_package_constraint(package_constraints, requirement);
-        install_package(requirement, package_constraints, resolved_packages, perf)?;
+    for package in prepared_packages {
+        install_prepared_package(package, perf)?;
     }
 
     Ok(())
 }
 
-fn ensure_resolved_package_matches(
-    package: &RequiredPackage,
-    resolved_package: &ResolvedPackageEntry,
-) -> Result<(), String> {
-    let satisfies =
-        semver_php::Semver::satisfies(&resolved_package.version, &package.constraint)
-            .map_err(|error| format!("Could not check installed package constraint: {error}"))?;
+fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Result<(), String> {
+    perf.log(
+        package.source_event,
+        package.source_duration,
+        &[("package", package.name.clone())],
+    )?;
 
-    if satisfies {
-        println!(
-            "Skipping already installed {} {}",
-            package.name, resolved_package.version
-        );
+    let link_started_at = Instant::now();
+    package_store::link_to_vendor(&package.source)?;
+    perf.log(
+        "vendor_link",
+        link_started_at.elapsed(),
+        &[("package", package.name.clone())],
+    )?;
+    print_install_summary(
+        &package.name,
+        &package.constraint,
+        package.source.path(),
+        &package.metadata_url,
+    );
 
-        return Ok(());
-    }
-
-    Err(format!(
-        "Version conflict for {}: resolved {} from {}, but requested {}",
-        package.name,
-        resolved_package.version,
-        resolved_package.constraints.join(", "),
-        package.constraint
-    ))
+    Ok(())
 }
 
-fn install_resolved_package(
-    package: &RequiredPackage,
-    resolved: &ResolvedPackage,
-    perf: &PerfLogger,
-) -> Result<(), String> {
-    print_release(&resolved.release);
-    print_requirements(&resolved.release);
+fn prepare_resolved_sources(
+    resolved_packages: &ResolvedPackages,
+) -> Result<Vec<PreparedPackage>, String> {
+    let mut packages = resolved_packages.iter().collect::<Vec<_>>();
 
-    let source_started_at = Instant::now();
+    packages.sort_by(|left, right| left.0.cmp(right.0));
+
+    std::thread::scope(|scope| {
+        let handles = packages
+            .into_iter()
+            .map(|(name, package)| scope.spawn(move || prepare_resolved_source(name, package)))
+            .collect::<Vec<_>>();
+
+        let mut prepared = Vec::with_capacity(handles.len());
+
+        for handle in handles {
+            let package = handle
+                .join()
+                .map_err(|_| "Package source worker panicked".to_string())??;
+            prepared.push(package);
+        }
+
+        Ok(prepared)
+    })
+}
+
+fn prepare_resolved_source(
+    name: &str,
+    package: &ResolvedPackageEntry,
+) -> Result<PreparedPackage, String> {
     let archive = PackageArchive {
-        version: &resolved.release.version,
-        dist_url: &resolved.release.dist_url,
+        version: &package.version,
+        dist_url: &package.dist_url,
     };
-
-    let source = package_store::prepare_source(&package.name, archive)?;
+    let started_at = Instant::now();
+    let source = package_store::prepare_source(name, archive)?;
     let source_event = if source.is_reused() {
         println!("Reusing {}", source.path().display());
         "source_reuse"
     } else {
         "source_download_extract"
     };
-    perf.log(
+
+    Ok(PreparedPackage {
+        name: name.to_string(),
+        constraint: package.constraints.join(", "),
+        metadata_url: package.metadata_url.clone(),
+        source,
+        source_duration: started_at.elapsed(),
         source_event,
-        source_started_at.elapsed(),
-        &[("package", package.name.clone())],
-    )?;
-
-    let link_started_at = Instant::now();
-    package_store::link_to_vendor(&source)?;
-    perf.log(
-        "vendor_link",
-        link_started_at.elapsed(),
-        &[("package", package.name.clone())],
-    )?;
-    print_install_summary(package, source.path(), &resolved.metadata_url);
-
-    Ok(())
+    })
 }
 
 fn install_locked_package(package: &LockedPackage, perf: &PerfLogger) -> Result<(), String> {
@@ -267,38 +207,16 @@ fn install_locked_package(package: &LockedPackage, perf: &PerfLogger) -> Result<
     Ok(())
 }
 
-fn print_release(release: &PackagistRelease) {
-    println!("Found {} versions", release.version_count);
-    println!("Selected {}", release.version);
-    println!("Requires {} packages", release.package_requires.len());
-    println!(
-        "Requires {} platform packages",
-        release.platform_requires.len()
-    );
-    println!("Dist {}", release.dist_url);
-}
-
-fn print_requirements(release: &PackagistRelease) {
-    for requirement in &release.package_requires {
-        println!(
-            "Package requirement: {} {}",
-            requirement.name, requirement.constraint
-        );
-    }
-
-    for requirement in &release.platform_requires {
-        println!(
-            "Platform requirement: {} {}",
-            requirement.name, requirement.constraint
-        );
-    }
-}
-
-fn print_install_summary(package: &RequiredPackage, source: &Path, metadata_url: &str) {
+fn print_install_summary(
+    package_name: &str,
+    package_constraint: &str,
+    source: &Path,
+    metadata_url: &str,
+) {
     println!(
         "{} {} -> {} ({})",
-        package.name,
-        package.constraint,
+        package_name,
+        package_constraint,
         source.display(),
         metadata_url
     );
