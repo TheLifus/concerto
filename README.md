@@ -1,8 +1,9 @@
 # Concerto
 
-[![Rust](https://img.shields.io/badge/Rust-2024-f74c00?logo=rust)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-experimental-orange.svg)](#current-status)
+<a href="https://www.rust-lang.org/"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/Rust-2024-f74c00.svg?mode=dark"><img alt="Rust 2024" src="https://shieldcn.dev/badge/Rust-2024-f74c00.svg?mode=light"></picture></a>
+<a href="https://github.com/TheLifus/concerto/actions/workflows/ci.yml"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/github/ci/TheLifus/concerto.svg?workflow=ci.yml&amp;branch=main&amp;mode=dark"><img alt="CI status" src="https://shieldcn.dev/github/ci/TheLifus/concerto.svg?workflow=ci.yml&amp;branch=main&amp;mode=light"></picture></a>
+<a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/license-MIT-2563eb.svg?mode=dark"><img alt="License MIT" src="https://shieldcn.dev/badge/license-MIT-2563eb.svg?mode=light"></picture></a>
+<a href="#current-status"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/status-experimental-f97316.svg?mode=dark"><img alt="Status experimental" src="https://shieldcn.dev/badge/status-experimental-f97316.svg?mode=light"></picture></a>
 
 > PNPM-inspired package management for Composer projects, written in Rust.
 
