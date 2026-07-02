@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 struct PackagePaths {
     vendor_link: PathBuf,
     zip: PathBuf,
-    extract: PathBuf,
+    published_source: PathBuf,
+    staged_source: PathBuf,
 }
 
 pub(crate) struct PackageSource {
@@ -37,7 +38,7 @@ pub(crate) fn prepare_source(
 
     let (path, reused) = match existing_source(&paths)? {
         Some(source) => (source, true),
-        None => (download_and_extract(archive, &paths)?, false),
+        None => (download_and_publish_source(archive, &paths)?, false),
     };
 
     Ok(PackageSource {
@@ -54,6 +55,10 @@ pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<(), String> {
                 "Vendor path already exists and is not a symlink: {}",
                 source.vendor_link.display()
             ));
+        }
+
+        if std::fs::read_link(&source.vendor_link).is_ok_and(|target| target == source.path) {
+            return Ok(());
         }
 
         std::fs::remove_file(&source.vendor_link)
@@ -83,20 +88,21 @@ fn package_paths(package_name: &str, version: &str) -> Result<PackagePaths, Stri
 
     Ok(PackagePaths {
         zip: store.join("package.zip"),
-        extract: store.join("source"),
+        published_source: store.join("source"),
+        staged_source: store.join("source.tmp"),
         vendor_link,
     })
 }
 
 fn existing_source(paths: &PackagePaths) -> Result<Option<PathBuf>, String> {
-    if !paths.extract.exists() {
+    if !paths.published_source.exists() {
         return Ok(None);
     }
 
-    only_child_dir(&paths.extract).map(Some)
+    published_source_dir(paths).map(Some)
 }
 
-fn download_and_extract(
+fn download_and_publish_source(
     archive: PackageArchive<'_>,
     paths: &PackagePaths,
 ) -> Result<PathBuf, String> {
@@ -106,19 +112,39 @@ fn download_and_extract(
         .map_err(|error| format!("Could not write package zip: {error}"))?;
     println!("Downloaded {}", paths.zip.display());
 
-    if paths.extract.exists() {
-        std::fs::remove_dir_all(&paths.extract)
-            .map_err(|error| format!("Could not clean package source directory: {error}"))?;
+    clean_staged_source(paths)?;
+
+    safe_unzip::extract_file(&paths.staged_source, &paths.zip)
+        .map_err(|error| format!("Could not extract package zip: {error}"))?;
+    println!("Extracted {}", paths.staged_source.display());
+
+    // Published sources may be shared by vendor links, so never delete them.
+    if paths.published_source.exists() {
+        clean_staged_source(paths)?;
+
+        return published_source_dir(paths);
     }
 
-    safe_unzip::extract_file(&paths.extract, &paths.zip)
-        .map_err(|error| format!("Could not extract package zip: {error}"))?;
-    println!("Extracted {}", paths.extract.display());
+    std::fs::rename(&paths.staged_source, &paths.published_source)
+        .map_err(|error| format!("Could not publish package source: {error}"))?;
 
-    let source = only_child_dir(&paths.extract)?;
+    let source = published_source_dir(paths)?;
     println!("Source {}", source.display());
 
     Ok(source)
+}
+
+fn clean_staged_source(paths: &PackagePaths) -> Result<(), String> {
+    if !paths.staged_source.exists() {
+        return Ok(());
+    }
+
+    std::fs::remove_dir_all(&paths.staged_source)
+        .map_err(|error| format!("Could not clean temporary package source: {error}"))
+}
+
+fn published_source_dir(paths: &PackagePaths) -> Result<PathBuf, String> {
+    only_child_dir(&paths.published_source)
 }
 
 fn only_child_dir(path: &Path) -> Result<PathBuf, String> {
