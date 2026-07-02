@@ -1,2 +1,183 @@
-# concerto
-A Rust-based, PNPM-inspired package manager for Composer projects.
+# Concerto
+
+[![Rust](https://img.shields.io/badge/Rust-2024-f74c00?logo=rust)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-experimental-orange.svg)](#current-status)
+
+> PNPM-inspired package management for Composer projects, written in Rust.
+
+Concerto experiments with a fast install model for PHP dependencies:
+
+- resolve packages from Packagist
+- keep extracted sources in a reusable store
+- symlink packages into `vendor/`
+- make lockfile installs extremely cheap
+
+It is not production-ready yet.
+
+## Quick Start
+
+```bash
+cargo build
+cargo run -- install
+```
+
+With a `composer.json`:
+
+```json
+{
+  "require": {
+    "monolog/monolog": "^3.0",
+    "guzzlehttp/guzzle": "^7.0"
+  }
+}
+```
+
+Concerto creates:
+
+```text
+.concerto/store/      # local package store
+vendor/               # symlinks to stored package sources
+concerto.lock         # resolved package versions
+```
+
+## Current Status
+
+| Works today | Not yet |
+| --- | --- |
+| `composer.json` `require` parsing | Composer autoload generation |
+| Packagist metadata fetches | Composer scripts and plugins |
+| transitive package resolution | `require-dev` |
+| Composer-like version constraints | custom repositories |
+| local package store | platform enforcement |
+| `vendor/` symlinks | full Composer solver parity |
+| `concerto.lock` fast path | global content-addressable store |
+| performance benchmark script | production security hardening |
+
+## Install Flow
+
+```mermaid
+flowchart TD
+    A["composer.json"] --> B["Root requirements"]
+    B --> C["Batched Packagist resolution"]
+    C --> D["Parallel source preparation"]
+    D --> E[".concerto/store"]
+    E --> F["vendor symlinks"]
+    F --> G["concerto.lock"]
+```
+
+```mermaid
+flowchart TD
+    A["composer.json"] --> B{"Lockfile matches?"}
+    B -- yes --> C["Read concerto.lock"]
+    C --> D["Reuse stored sources"]
+    D --> E["Relink vendor"]
+    B -- no --> F["Resolve and install"]
+```
+
+## Performance
+
+Run the benchmark:
+
+```bash
+scripts/bench-composer.sh
+```
+
+Sample local result:
+
+```text
+Average over 6 cases (12 packages average):
+  Cold install: Concerto is 1.7x faster than Composer (1360ms vs 2363ms).
+  Lock install: Concerto is 50.5x faster than Composer warm (17ms vs 858ms).
+  Vendor relink: Concerto averages 18ms.
+```
+
+Benchmark caveats:
+
+- Composer runs in Docker through `composer:2`.
+- Composer uses `--ignore-platform-reqs`.
+- Concerto currently does less work than Composer.
+- Network timings vary.
+
+The key signal is the repeated install path: `concerto.lock` plus store reuse
+makes rebuilding `vendor/` very cheap.
+
+## Architecture
+
+| File | Responsibility |
+| --- | --- |
+| `src/composer.rs` | `composer.json` parsing and package validation |
+| `src/packagist.rs` | Packagist metadata parsing and version selection |
+| `src/resolver.rs` | dependency batches and constraint merging |
+| `src/package_store.rs` | archive download, extraction, source reuse, links |
+| `src/lockfile.rs` | `concerto.lock` read/write and root matching |
+| `src/perf.rs` | optional performance logs |
+| `src/installer.rs` | install orchestration |
+
+## Debug Logs
+
+```bash
+CONCERTO_DEBUG_PERF=1 concerto install
+```
+
+Logs append to:
+
+```text
+.concerto/logs/perf.log
+```
+
+Useful events:
+
+```text
+resolve_package
+sources_prepare
+source_download_extract
+source_reuse
+vendor_link
+lockfile_install
+lockfile_write
+```
+
+## Quality Gates
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Manual E2E:
+
+```bash
+cargo test --test cli -- --ignored --test-threads=1
+```
+
+## Roadmap
+
+Production-grade next steps:
+
+- versioned lockfile format
+- root requirement hash in `concerto.lock`
+- platform requirements: `php`, `ext-*`, `lib-*`
+- Composer-compatible autoload generation
+- HTTP metadata cache
+- local Packagist fixtures for deterministic tests
+- CI quality gates
+- clearer install errors
+
+Later:
+
+- `require-dev`
+- `conflict`, `replace`, `provide`, `suggest`
+- custom repositories
+- global content-addressable store
+- garbage collection
+- Composer scripts/plugins strategy
+- stronger dependency solver
+
+## License
+
+MIT.
+
+[composer-badge]: https://img.shields.io/badge/Composer-compatible%20goal-885630?logo=composer
+[composer-url]: https://getcomposer.org/
