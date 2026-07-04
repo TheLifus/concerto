@@ -42,6 +42,8 @@ vendor/               # symlinks to stored package sources
 concerto.lock         # resolved package versions
 ```
 
+The lockfile format is documented in [docs/lockfile.md](docs/lockfile.md).
+
 ## Current Status
 
 | Works today | Not yet |

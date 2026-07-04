@@ -226,6 +226,7 @@ fn build_lockfile(
     root_requirements: Vec<RequiredPackage>,
     resolved_packages: ResolvedPackages,
 ) -> Lockfile {
+    let mut root_requirements = root_requirements;
     let mut packages = resolved_packages
         .into_iter()
         .map(|(name, package)| LockedPackage {
@@ -237,6 +238,7 @@ fn build_lockfile(
         })
         .collect::<Vec<_>>();
 
+    root_requirements.sort_by(|left, right| left.name.cmp(&right.name));
     packages.sort_by(|left, right| left.name.cmp(&right.name));
 
     Lockfile {
