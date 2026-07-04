@@ -240,6 +240,8 @@ fn build_lockfile(
     packages.sort_by(|left, right| left.name.cmp(&right.name));
 
     Lockfile {
+        lockfile_version: lockfile::LOCKFILE_VERSION,
+        root_requirements_hash: lockfile::root_requirements_hash(&root_requirements),
         root_requirements,
         packages,
     }
