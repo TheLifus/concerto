@@ -1,5 +1,6 @@
-use super::{PackageSourcePreparation, prepare_package_source};
+use super::{MAX_PARALLEL_WORKERS, PackageSourcePreparation, prepare_package_source};
 use crate::error::{ConcertoError, Result};
+use crate::install_event::{InstallEventKind, InstallReporter};
 use crate::lockfile::LockedPackage;
 use crate::package_store;
 use crate::perf::PerfLogger;
@@ -13,9 +14,13 @@ struct PreparedLockedPackage {
     source_event: &'static str,
 }
 
-pub(super) fn install(packages: &[LockedPackage], perf: &PerfLogger) -> Result<()> {
+pub(super) fn install(
+    packages: &[LockedPackage],
+    perf: &PerfLogger,
+    reporter: &InstallReporter,
+) -> Result<()> {
     let prepare_started_at = Instant::now();
-    let prepared_packages = prepare_sources(packages)?;
+    let prepared_packages = prepare_sources(packages, reporter)?;
 
     perf.log(
         "lockfile_sources_prepare",
@@ -24,17 +29,38 @@ pub(super) fn install(packages: &[LockedPackage], perf: &PerfLogger) -> Result<(
     )?;
 
     for package in prepared_packages {
-        install_prepared_package(package, perf)?;
+        install_prepared_package(package, perf, reporter)?;
     }
 
     Ok(())
 }
 
-fn prepare_sources(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPackage>> {
+fn prepare_sources(
+    packages: &[LockedPackage],
+    reporter: &InstallReporter,
+) -> Result<Vec<PreparedLockedPackage>> {
+    let mut prepared = Vec::with_capacity(packages.len());
+
+    for batch in packages.chunks(MAX_PARALLEL_WORKERS) {
+        let mut batch = prepare_source_batch(batch, reporter)?;
+        prepared.append(&mut batch);
+    }
+
+    Ok(prepared)
+}
+
+fn prepare_source_batch(
+    packages: &[LockedPackage],
+    reporter: &InstallReporter,
+) -> Result<Vec<PreparedLockedPackage>> {
     std::thread::scope(|scope| {
         let handles = packages
             .iter()
-            .map(|package| scope.spawn(move || prepare_source(package)))
+            .map(|package| {
+                let reporter = reporter.clone();
+
+                scope.spawn(move || prepare_source(package, &reporter))
+            })
             .collect::<Vec<_>>();
 
         let mut prepared = Vec::with_capacity(handles.len());
@@ -50,12 +76,15 @@ fn prepare_sources(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPacka
     })
 }
 
-fn prepare_source(package: &LockedPackage) -> Result<PreparedLockedPackage> {
+fn prepare_source(
+    package: &LockedPackage,
+    reporter: &InstallReporter,
+) -> Result<PreparedLockedPackage> {
     let PackageSourcePreparation {
         source,
         duration,
         event,
-    } = prepare_package_source(&package.name, &package.version, &package.dist_url)?;
+    } = prepare_package_source(&package.name, &package.version, &package.dist_url, reporter)?;
 
     Ok(PreparedLockedPackage {
         name: package.name.clone(),
@@ -66,7 +95,11 @@ fn prepare_source(package: &LockedPackage) -> Result<PreparedLockedPackage> {
     })
 }
 
-fn install_prepared_package(package: PreparedLockedPackage, perf: &PerfLogger) -> Result<()> {
+fn install_prepared_package(
+    package: PreparedLockedPackage,
+    perf: &PerfLogger,
+    reporter: &InstallReporter,
+) -> Result<()> {
     perf.log(
         package.source_event,
         package.source_duration,
@@ -81,12 +114,11 @@ fn install_prepared_package(package: PreparedLockedPackage, perf: &PerfLogger) -
         &[("package", package.name.clone())],
     )?;
 
-    println!(
-        "{} {} -> {}",
-        package.name,
-        package.version,
-        package.source.path().display()
-    );
+    reporter.emit(InstallEventKind::VendorLinked {
+        package: package.name,
+        version: package.version,
+        path: InstallReporter::path(package.source.path()),
+    });
 
     Ok(())
 }

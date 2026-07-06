@@ -165,7 +165,6 @@ fn download_and_publish_source(
             format!("could not write package zip: {error}"),
         )
     })?;
-    println!("Downloaded {}", paths.zip.display());
 
     clean_staged_source(paths)?;
 
@@ -177,7 +176,6 @@ fn download_and_publish_source(
             "Remove the package from .concerto/store and retry.",
         )
     })?;
-    println!("Extracted {}", paths.staged_source.display());
 
     // Published sources may be shared by vendor links, so never delete them.
     if paths.published_source.exists() {
@@ -195,7 +193,6 @@ fn download_and_publish_source(
     })?;
 
     let source = published_source_dir(paths)?;
-    println!("Source {}", source.display());
 
     Ok(source)
 }

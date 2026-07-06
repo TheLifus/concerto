@@ -32,7 +32,6 @@ fn rejects_unmet_resolved_platform_requirements() {
         ResolvedPackageEntry {
             version: "8.0.0".to_string(),
             dist_url: "https://example.com/symfony-console.zip".to_string(),
-            metadata_url: "https://repo.packagist.org/p2/symfony/console.json".to_string(),
             constraints: vec!["^8.0".to_string()],
             package_requires: Vec::new(),
             platform_requires: vec![required_package("ext-intl", "*")],

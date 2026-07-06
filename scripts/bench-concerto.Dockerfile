@@ -1,5 +1,5 @@
 ARG COMPOSER_IMAGE=composer:2
-ARG RUST_IMAGE=rust:1-bookworm
+ARG RUST_IMAGE=rust:1-alpine
 
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src

@@ -86,6 +86,19 @@ fn fails_for_unknown_command() {
 }
 
 #[test]
+fn fails_ui_without_interactive_terminal() {
+    let project = temp_project("ui-without-terminal");
+    let output = concerto_command()
+        .args(["install", "--ui"])
+        .current_dir(project)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("Cannot start terminal UI"));
+}
+
+#[test]
 fn fails_install_without_composer_json() {
     let project = temp_project("missing-composer-json");
     let output = concerto_command()
