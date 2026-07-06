@@ -1,35 +1,15 @@
+mod support;
+
 use serde_json::Value;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::process::Output;
+use std::time::Instant;
+
+use support::{concerto_command, locked_version, read_lockfile, stderr, stdout, temp_project};
 
 const NO_COMPOSER_JSON: &str = "No composer.json found";
 const REQUIRE_MUST_BE_OBJECT: &str = "composer.json require must be an object";
 const USAGE: &str = "Usage: concerto install";
-
-fn concerto_command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_concerto"))
-}
-
-fn temp_project(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("concerto-{name}-{nanos}"));
-
-    std::fs::create_dir_all(&path).unwrap();
-
-    path
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).to_string()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).to_string()
-}
 
 fn install(project: &Path) -> Output {
     concerto_command()
@@ -53,23 +33,6 @@ fn timed_debug_install(project: &Path) -> (Output, u128) {
     let output = debug_install(project);
 
     (output, started_at.elapsed().as_millis())
-}
-
-fn read_lockfile(project: &Path) -> Value {
-    let content = std::fs::read_to_string(project.join("concerto.lock")).unwrap();
-
-    serde_json::from_str(&content).unwrap()
-}
-
-fn locked_version(lockfile: &Value, package_name: &str) -> String {
-    lockfile["packages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|package| package["name"] == package_name)
-        .and_then(|package| package["version"].as_str())
-        .unwrap()
-        .to_string()
 }
 
 fn locked_package_count(lockfile: &Value) -> usize {

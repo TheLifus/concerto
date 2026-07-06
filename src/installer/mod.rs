@@ -1,3 +1,6 @@
+mod lockfile_install;
+mod resolved_install;
+
 use crate::autoload;
 use crate::lockfile::{self, LockedPackage, Lockfile};
 use std::path::Path;
@@ -6,18 +9,15 @@ use crate::composer::{RequiredPackage, required_packages};
 use crate::package_store::{self, PackageArchive};
 use crate::perf::PerfLogger;
 use crate::platform;
-use crate::resolver::{self, ResolvedPackageEntry, ResolvedPackages};
+use crate::resolver::{self, ResolvedPackages};
 use std::time::{Duration, Instant};
 
 pub(crate) const NO_COMPOSER_JSON: &str = "No composer.json found";
 
-struct PreparedPackage {
-    name: String,
-    constraint: String,
-    metadata_url: String,
+pub(super) struct PackageSourcePreparation {
     source: package_store::PackageSource,
-    source_duration: Duration,
-    source_event: &'static str,
+    duration: Duration,
+    event: &'static str,
 }
 
 pub fn install() -> Result<(), String> {
@@ -40,9 +40,7 @@ pub fn install() -> Result<(), String> {
             validate_locked_platform_requirements(&lockfile.packages, &platform)?;
             let lockfile_started_at = Instant::now();
 
-            for package in &lockfile.packages {
-                install_locked_package(package, &perf)?;
-            }
+            lockfile_install::install(&lockfile.packages, &perf)?;
 
             write_autoload(&lockfile, &content, &perf)?;
             perf.log(
@@ -67,7 +65,7 @@ pub fn install() -> Result<(), String> {
     let resolved_packages = resolver::resolve(&packages, &perf)?;
     validate_resolved_platform_requirements(&resolved_packages, &platform)?;
     let package_count = resolved_packages.len();
-    install_resolved_packages(&resolved_packages, &perf)?;
+    resolved_install::install(&resolved_packages, &perf)?;
 
     let lockfile = build_lockfile(packages, resolved_packages);
     write_autoload(&lockfile, &content, &perf)?;
@@ -115,84 +113,12 @@ fn validate_resolved_platform_requirements(
 
     Ok(())
 }
-fn install_resolved_packages(
-    resolved_packages: &ResolvedPackages,
-    perf: &PerfLogger,
-) -> Result<(), String> {
-    let prepare_started_at = Instant::now();
-    let prepared_packages = prepare_resolved_sources(resolved_packages)?;
-
-    perf.log(
-        "sources_prepare",
-        prepare_started_at.elapsed(),
-        &[("packages", prepared_packages.len().to_string())],
-    )?;
-
-    for package in prepared_packages {
-        install_prepared_package(package, perf)?;
-    }
-
-    Ok(())
-}
-
-fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Result<(), String> {
-    perf.log(
-        package.source_event,
-        package.source_duration,
-        &[("package", package.name.clone())],
-    )?;
-
-    let link_started_at = Instant::now();
-    package_store::link_to_vendor(&package.source)?;
-    perf.log(
-        "vendor_link",
-        link_started_at.elapsed(),
-        &[("package", package.name.clone())],
-    )?;
-    print_install_summary(
-        &package.name,
-        &package.constraint,
-        package.source.path(),
-        &package.metadata_url,
-    );
-
-    Ok(())
-}
-
-fn prepare_resolved_sources(
-    resolved_packages: &ResolvedPackages,
-) -> Result<Vec<PreparedPackage>, String> {
-    let mut packages = resolved_packages.iter().collect::<Vec<_>>();
-
-    packages.sort_by(|left, right| left.0.cmp(right.0));
-
-    std::thread::scope(|scope| {
-        let handles = packages
-            .into_iter()
-            .map(|(name, package)| scope.spawn(move || prepare_resolved_source(name, package)))
-            .collect::<Vec<_>>();
-
-        let mut prepared = Vec::with_capacity(handles.len());
-
-        for handle in handles {
-            let package = handle
-                .join()
-                .map_err(|_| "Package source worker panicked".to_string())??;
-            prepared.push(package);
-        }
-
-        Ok(prepared)
-    })
-}
-
-fn prepare_resolved_source(
+fn prepare_package_source(
     name: &str,
-    package: &ResolvedPackageEntry,
-) -> Result<PreparedPackage, String> {
-    let archive = PackageArchive {
-        version: &package.version,
-        dist_url: &package.dist_url,
-    };
+    version: &str,
+    dist_url: &str,
+) -> Result<PackageSourcePreparation, String> {
+    let archive = PackageArchive { version, dist_url };
     let started_at = Instant::now();
     let source = package_store::prepare_source(name, archive)?;
     let source_event = if source.is_reused() {
@@ -202,53 +128,11 @@ fn prepare_resolved_source(
         "source_download_extract"
     };
 
-    Ok(PreparedPackage {
-        name: name.to_string(),
-        constraint: package.constraints.join(", "),
-        metadata_url: package.metadata_url.clone(),
+    Ok(PackageSourcePreparation {
         source,
-        source_duration: started_at.elapsed(),
-        source_event,
+        duration: started_at.elapsed(),
+        event: source_event,
     })
-}
-
-fn install_locked_package(package: &LockedPackage, perf: &PerfLogger) -> Result<(), String> {
-    let archive = PackageArchive {
-        version: &package.version,
-        dist_url: &package.dist_url,
-    };
-
-    let source_started_at = Instant::now();
-    let source = package_store::prepare_source(&package.name, archive)?;
-    let source_event = if source.is_reused() {
-        println!("Reusing {}", source.path().display());
-        "source_reuse"
-    } else {
-        "source_download_extract"
-    };
-
-    perf.log(
-        source_event,
-        source_started_at.elapsed(),
-        &[("package", package.name.clone())],
-    )?;
-
-    let link_started_at = Instant::now();
-    package_store::link_to_vendor(&source)?;
-    perf.log(
-        "vendor_link",
-        link_started_at.elapsed(),
-        &[("package", package.name.clone())],
-    )?;
-
-    println!(
-        "{} {} -> {}",
-        package.name,
-        package.version,
-        source.path().display()
-    );
-
-    Ok(())
 }
 
 fn print_install_summary(

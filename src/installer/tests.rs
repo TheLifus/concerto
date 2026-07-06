@@ -1,5 +1,6 @@
 use super::*;
 use crate::platform::Platform;
+use crate::resolver::ResolvedPackageEntry;
 use std::collections::HashMap;
 
 #[test]
