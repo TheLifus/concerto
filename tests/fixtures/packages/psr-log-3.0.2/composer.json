@@ -1,0 +1,12 @@
+{
+  "name": "psr/log",
+  "version": "3.0.2",
+  "autoload": {
+    "psr-4": {
+      "Psr\\Log\\": "src/"
+    }
+  },
+  "require": {
+    "php": ">=8.0"
+  }
+}

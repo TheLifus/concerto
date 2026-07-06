@@ -1,6 +1,11 @@
 use crate::composer::RequiredPackage;
 use std::process::Command;
 
+const PLATFORM_EXTENSIONS_ENV: &str = "CONCERTO_PLATFORM_EXTENSIONS";
+const PLATFORM_PHP_ENV: &str = "CONCERTO_PLATFORM_PHP";
+const PHP_PLATFORM_SCRIPT: &str = "echo PHP_VERSION, PHP_EOL; foreach \
+    (get_loaded_extensions() as $extension) { echo $extension, PHP_EOL; }";
+
 #[derive(Debug)]
 pub(crate) struct Platform {
     pub php_version: String,
@@ -73,13 +78,14 @@ fn platform_error(package_name: &str, requirement: &RequiredPackage, detected: &
 }
 
 pub(crate) fn current() -> Result<Platform, String> {
-    let output = command_output(
-        "php",
-        &[
-            "-r",
-            "echo PHP_VERSION, PHP_EOL; foreach (get_loaded_extensions() as $extension) { echo $extension, PHP_EOL; }",
-        ],
-    )?;
+    if let Ok(php_version) = std::env::var(PLATFORM_PHP_ENV) {
+        return Ok(Platform {
+            php_version,
+            extensions: env_extensions(),
+        });
+    }
+
+    let output = command_output("php", &["-r", PHP_PLATFORM_SCRIPT])?;
 
     parse_platform(&output)
 }
@@ -115,6 +121,16 @@ fn parse_platform(output: &str) -> Result<Platform, String> {
         php_version,
         extensions,
     })
+}
+
+fn env_extensions() -> Vec<String> {
+    std::env::var(PLATFORM_EXTENSIONS_ENV)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,0 +1,16 @@
+{
+  "packages": {
+    "monolog/monolog": [
+      {
+        "version": "3.0.0",
+        "dist": {
+          "url": "__ARCHIVE_BASE_URL__/monolog-monolog-3.0.0.zip"
+        },
+        "require": {
+          "php": ">=8.0",
+          "psr/log": "^3.0"
+        }
+      }
+    ]
+  }
+}
