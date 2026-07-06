@@ -103,20 +103,22 @@ Run the benchmark:
 scripts/bench-composer.sh
 ```
 
-Sample local result:
+Sample Docker result:
 
 ```text
-Average over 6 cases (12 packages average):
-  Cold install: Concerto is 1.7x faster than Composer (1360ms vs 2363ms).
-  Lock install: Concerto is 50.5x faster than Composer warm (17ms vs 858ms).
-  Vendor relink: Concerto averages 18ms.
+Average over 6 cases (11 packages average):
+  Cold install: Concerto is 1.5x faster than Composer (1030ms vs 1518ms).
+  Lock install: Concerto is 2.8x faster than Composer warm (235ms vs 659ms).
+  Vendor relink: Concerto averages 255ms.
 ```
 
 Benchmark caveats:
 
-- Composer runs in Docker through `composer:2`.
+- Composer and Concerto run in Docker.
+- Concerto is built into a bench image based on the same `composer:2` image.
 - Composer uses `--ignore-platform-reqs`.
 - Concerto currently does less work than Composer.
+- Docker startup and mounted-volume filesystem costs are included.
 - Network timings vary.
 
 The key signal is the repeated install path: `concerto.lock` plus store reuse

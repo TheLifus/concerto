@@ -1,0 +1,6 @@
+.concerto
+.git
+.idea
+target
+vendor
+concerto.lock

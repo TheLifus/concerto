@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONCERTO="$ROOT/target/debug/concerto"
 WORKDIR="$(mktemp -d)"
+COMPOSER_IMAGE="${COMPOSER_IMAGE:-composer:2}"
+CONCERTO_IMAGE="${CONCERTO_IMAGE:-concerto-bench:local}"
+RUST_IMAGE="${RUST_IMAGE:-rust:1-alpine}"
 
 CASE_COUNT=0
 TOTAL_PACKAGES=0
@@ -22,9 +24,18 @@ now_ms() {
 timed() {
     local start
     local end
+    local status
 
     start="$(now_ms)"
+    set +e
     "$@" >/dev/null
+    status="$?"
+    set -e
+
+    if [ "$status" -ne 0 ]; then
+        return "$status"
+    fi
+
     end="$(now_ms)"
 
     echo $((end - start))
@@ -46,7 +57,7 @@ composer_install() {
         --volume "$project:/app" \
         --workdir /app \
         --env COMPOSER_HOME=/tmp/composer-home \
-        composer:2 \
+        "$COMPOSER_IMAGE" \
         install \
         --ignore-platform-reqs \
         --no-interaction \
@@ -58,10 +69,13 @@ composer_install() {
 concerto_install() {
     local project="$1"
 
-    (
-        cd "$project"
-        CONCERTO_DEBUG_PERF=1 "$CONCERTO" install
-    )
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        --volume "$project:/app" \
+        --workdir /app \
+        --env CONCERTO_DEBUG_PERF=1 \
+        "$CONCERTO_IMAGE" \
+        install
 }
 
 package_count() {
@@ -198,10 +212,17 @@ command -v docker >/dev/null || {
     exit 1
 }
 
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml"
-docker image inspect composer:2 >/dev/null 2>&1 || docker pull composer:2 >/dev/null 2>&1
+docker image inspect "$COMPOSER_IMAGE" >/dev/null 2>&1 || docker pull "$COMPOSER_IMAGE" >/dev/null 2>&1
+docker build \
+    --quiet \
+    --file "$ROOT/scripts/bench-concerto.Dockerfile" \
+    --build-arg COMPOSER_IMAGE="$COMPOSER_IMAGE" \
+    --build-arg RUST_IMAGE="$RUST_IMAGE" \
+    --tag "$CONCERTO_IMAGE" \
+    "$ROOT" >/dev/null
 
-echo "Composer runs with --ignore-platform-reqs because Concerto does not enforce platform yet."
+echo "Composer and Concerto run in Docker with $COMPOSER_IMAGE."
+echo "Composer runs with --ignore-platform-reqs."
 printf '%-16s %8s %13s %13s %13s %13s %15s %-14s %-14s\n' \
     "case" \
     "packages" \
