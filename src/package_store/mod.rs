@@ -1,6 +1,6 @@
 use crate::composer::package_path_parts;
 use crate::error::{ConcertoError, Result, StoreStep};
-use crate::http::download_bytes;
+use crate::http::download_to_file;
 use std::path::{Path, PathBuf};
 
 struct PackagePaths {
@@ -149,20 +149,12 @@ fn download_and_publish_source(
     archive: PackageArchive<'_>,
     paths: &PackagePaths,
 ) -> Result<PathBuf> {
-    let zip = download_bytes(archive.dist_url).map_err(|error| {
+    download_to_file(archive.dist_url, &paths.zip).map_err(|error| {
         ConcertoError::store_with_hint(
             paths.package_name(),
             StoreStep::Download,
             format!("archive {} failed: {error}", archive.dist_url),
             "Check the dist URL or retry the install.",
-        )
-    })?;
-
-    std::fs::write(&paths.zip, zip).map_err(|error| {
-        ConcertoError::store(
-            paths.package_name(),
-            StoreStep::Download,
-            format!("could not write package zip: {error}"),
         )
     })?;
 

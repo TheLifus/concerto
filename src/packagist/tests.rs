@@ -106,6 +106,118 @@ fn skips_releases_that_do_not_match_constraint() {
 }
 
 #[test]
+fn skips_unset_require_on_release_that_does_not_match_constraint() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "psr/log": [
+            {
+                "version": "3.0.2",
+                "dist": {
+                    "url": "https://example.com/3.0.2.zip"
+                },
+                "require": {
+                    "php": ">=8.0"
+                }
+            },
+            {
+                "version": "1.0.0",
+                "dist": {
+                    "url": "https://example.com/1.0.0.zip"
+                },
+                "require": "__unset"
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^3.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "psr/log",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "3.0.2");
+}
+
+#[test]
+fn does_not_parse_require_for_release_that_does_not_match_constraint() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "psr/log": [
+            {
+                "version": "3.0.2",
+                "dist": {
+                    "url": "https://example.com/3.0.2.zip"
+                },
+                "require": {
+                    "php": ">=8.0"
+                }
+            },
+            {
+                "version": "1.0.0",
+                "dist": {
+                    "url": "https://example.com/1.0.0.zip"
+                },
+                "require": {
+                    "php": false
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^3.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "psr/log",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "3.0.2");
+}
+
+#[test]
+fn treats_unset_require_as_empty_requirements() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "psr/log": [
+            {
+                "version": "1.0.0",
+                "dist": {
+                    "url": "https://example.com/1.0.0.zip"
+                },
+                "require": "__unset"
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^1.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "psr/log",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "1.0.0");
+    assert_eq!(release.package_requires, Vec::new());
+    assert_eq!(release.platform_requires, Vec::new());
+}
+
+#[test]
 fn skips_releases_without_dist_url() {
     let metadata_json = r#"
 {

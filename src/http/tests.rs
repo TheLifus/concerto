@@ -8,9 +8,11 @@ fn reads_local_file_urls() {
     std::fs::write(&path, "fixture").unwrap();
 
     let url = format!("file://{}", path.display());
+    let destination = temp_file("downloaded-local-url");
 
     assert_eq!(get_text(&url).unwrap(), "fixture");
-    assert_eq!(download_bytes(&url).unwrap(), b"fixture");
+    download_to_file(&url, &destination).unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"fixture");
 }
 
 fn temp_file(name: &str) -> std::path::PathBuf {
