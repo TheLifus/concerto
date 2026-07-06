@@ -9,7 +9,8 @@ use support::{concerto_command, locked_version, read_lockfile, stderr, stdout, t
 
 const NO_COMPOSER_JSON: &str = "No composer.json found";
 const REQUIRE_MUST_BE_OBJECT: &str = "composer.json require must be an object";
-const USAGE: &str = "Usage: concerto install";
+const USAGE: &str = "Usage: concerto <COMMAND>";
+const VERSION: &str = concat!("concerto ", env!("CARGO_PKG_VERSION"));
 
 fn install(project: &Path) -> Output {
     concerto_command()
@@ -52,6 +53,36 @@ fn prints_help_without_command() {
 
     assert!(output.status.success());
     assert!(stdout(&output).contains(USAGE));
+    assert!(stdout(&output).contains("install"));
+    assert!(stdout(&output).contains("  -h, --help     Print help"));
+    assert!(stdout(&output).contains("  -V, --version  Print version"));
+}
+
+#[test]
+fn prints_help_with_help_flag() {
+    let output = concerto_command().arg("--help").output().unwrap();
+
+    assert!(output.status.success());
+    assert!(stdout(&output).contains(USAGE));
+    assert!(stdout(&output).contains("--version"));
+}
+
+#[test]
+fn prints_version_with_version_flag() {
+    let output = concerto_command().arg("--version").output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(stdout(&output).trim(), VERSION);
+}
+
+#[test]
+fn fails_for_unknown_command() {
+    let output = concerto_command().arg("unknown").output().unwrap();
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Unknown command: unknown"));
+    assert!(error.contains(USAGE));
 }
 
 #[test]
