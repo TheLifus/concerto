@@ -42,25 +42,21 @@ fn prepare_sources(
     let mut prepared = Vec::with_capacity(packages.len());
 
     for batch in packages.chunks(MAX_PARALLEL_WORKERS) {
-        let mut batch = prepare_source_batch(batch, reporter)?;
+        let mut batch = prepare_source_batch(batch)?;
+        for package in &batch {
+            emit_source_event(package, reporter);
+        }
         prepared.append(&mut batch);
     }
 
     Ok(prepared)
 }
 
-fn prepare_source_batch(
-    packages: &[LockedPackage],
-    reporter: &InstallReporter,
-) -> Result<Vec<PreparedLockedPackage>> {
+fn prepare_source_batch(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPackage>> {
     std::thread::scope(|scope| {
         let handles = packages
             .iter()
-            .map(|package| {
-                let reporter = reporter.clone();
-
-                scope.spawn(move || prepare_source(package, &reporter))
-            })
+            .map(|package| scope.spawn(move || prepare_source(package)))
             .collect::<Vec<_>>();
 
         let mut prepared = Vec::with_capacity(handles.len());
@@ -76,15 +72,12 @@ fn prepare_source_batch(
     })
 }
 
-fn prepare_source(
-    package: &LockedPackage,
-    reporter: &InstallReporter,
-) -> Result<PreparedLockedPackage> {
+fn prepare_source(package: &LockedPackage) -> Result<PreparedLockedPackage> {
     let PackageSourcePreparation {
         source,
         duration,
         event,
-    } = prepare_package_source(&package.name, &package.version, &package.dist_url, reporter)?;
+    } = prepare_package_source(&package.name, &package.version, &package.dist_url)?;
 
     Ok(PreparedLockedPackage {
         name: package.name.clone(),
@@ -121,4 +114,20 @@ fn install_prepared_package(
     });
 
     Ok(())
+}
+
+fn emit_source_event(package: &PreparedLockedPackage, reporter: &InstallReporter) {
+    let path = InstallReporter::path(package.source.path());
+
+    if package.source_event == "source_reuse" {
+        reporter.emit(InstallEventKind::SourceReused {
+            package: package.name.clone(),
+            path,
+        });
+    } else {
+        reporter.emit(InstallEventKind::SourcePrepared {
+            package: package.name.clone(),
+            path,
+        });
+    }
 }

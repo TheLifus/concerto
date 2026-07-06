@@ -1,0 +1,26 @@
+{
+  "packages": {
+    "acme/app": [
+      {
+        "version": "1.1.0",
+        "dist": {
+          "url": "__ARCHIVE_BASE_URL__/acme-platform-choice-1.0.0.zip"
+        },
+        "require": {
+          "php": ">=8.0",
+          "acme/log": "^3.0"
+        }
+      },
+      {
+        "version": "1.0.0",
+        "dist": {
+          "url": "__ARCHIVE_BASE_URL__/acme-platform-choice-1.0.0.zip"
+        },
+        "require": {
+          "php": ">=8.0",
+          "acme/log": "^2.0"
+        }
+      }
+    ]
+  }
+}

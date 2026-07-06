@@ -35,6 +35,8 @@ fn prepare_packagist_fixtures(project: &Path) -> PathBuf {
         "monolog-monolog",
         "acme-platform-lock",
         "acme-platform-choice",
+        "acme-app",
+        "acme-log",
     ] {
         let content = std::fs::read_to_string(fixture_path(&format!(
             "tests/fixtures/packagist/{fixture}.json"
@@ -73,6 +75,18 @@ fn offline_install_with_platform(project: &Path, metadata_dir: &Path, php_versio
         .env(PACKAGIST_FIXTURES_ENV, metadata_dir)
         .env(PLATFORM_PHP_ENV, php_version)
         .env(PLATFORM_EXTENSIONS_ENV, "json")
+        .output()
+        .unwrap()
+}
+
+fn offline_debug_install(project: &Path, metadata_dir: &Path) -> Output {
+    concerto_command()
+        .arg("install")
+        .current_dir(project)
+        .env(PACKAGIST_FIXTURES_ENV, metadata_dir)
+        .env(PLATFORM_PHP_ENV, "8.2.25")
+        .env(PLATFORM_EXTENSIONS_ENV, "json")
+        .env("CONCERTO_DEBUG_PERF", "1")
         .output()
         .unwrap()
 }
@@ -336,4 +350,34 @@ fn offline_selects_older_platform_compatible_release() {
     let lockfile = read_lockfile(&project);
 
     assert_eq!(locked_version(&lockfile, "acme/platform-choice"), "1.0.0");
+}
+
+#[test]
+fn offline_backtracks_when_latest_candidate_conflicts_later() {
+    let project = temp_project("offline-backtracking");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"acme/app":"^1.0","acme/log":"^2.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_debug_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/acme/app").exists());
+    assert!(project.join("vendor/acme/log").exists());
+    assert_install_summary(&output, 2);
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "acme/app"), "1.0.0");
+    assert_eq!(locked_version(&lockfile, "acme/log"), "2.0.0");
+
+    let perf_log = std::fs::read_to_string(project.join(".concerto/logs/perf.log")).unwrap();
+
+    assert!(perf_log.contains("resolve_candidates"));
+    assert!(perf_log.contains("resolve_solver"));
+    assert!(perf_log.contains("decisions="));
+    assert!(perf_log.contains("backtracks="));
 }

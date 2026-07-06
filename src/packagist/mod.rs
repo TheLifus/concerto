@@ -6,7 +6,7 @@ use crate::platform::{self, Platform};
 
 const NO_MATCHING_VERSION: &str = "Packagist metadata does not contain a version matching";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PackagistRelease {
     pub version_count: usize,
     pub version: String,
@@ -31,12 +31,57 @@ pub fn package_url(package_name: &str) -> Result<String> {
     ))
 }
 
-pub fn first_release_candidate(
+#[cfg(test)]
+pub(crate) fn first_release_candidate(
     metadata_json: &str,
     package_name: &str,
     constraints: &[String],
     platform: &Platform,
 ) -> Result<PackagistRelease> {
+    let (candidates, platform_rejections) =
+        parsed_release_candidates(metadata_json, package_name, constraints, platform)?;
+
+    for candidate in candidates {
+        if candidate.matches_constraints(package_name, constraints)? {
+            return Ok(candidate);
+        }
+    }
+
+    Err(no_matching_version_error(
+        package_name,
+        constraints,
+        platform,
+        &platform_rejections,
+    ))
+}
+
+pub(crate) fn release_candidates(
+    metadata_json: &str,
+    package_name: &str,
+    constraints: &[String],
+    platform: &Platform,
+) -> Result<Vec<PackagistRelease>> {
+    let (candidates, platform_rejections) =
+        parsed_release_candidates(metadata_json, package_name, constraints, platform)?;
+
+    if candidates.is_empty() && !platform_rejections.is_empty() {
+        return Err(no_matching_version_error(
+            package_name,
+            constraints,
+            platform,
+            &platform_rejections,
+        ));
+    }
+
+    Ok(candidates)
+}
+
+fn parsed_release_candidates(
+    metadata_json: &str,
+    package_name: &str,
+    constraints: &[String],
+    platform: &Platform,
+) -> Result<(Vec<PackagistRelease>, Vec<PlatformRejection>)> {
     let parsed: serde_json::Value = serde_json::from_str(metadata_json).map_err(|error| {
         ConcertoError::resolution(
             package_name,
@@ -58,6 +103,7 @@ pub fn first_release_candidate(
         })?;
 
     let mut platform_rejections = Vec::new();
+    let mut candidates = Vec::new();
 
     for release in versions {
         let Some(candidate) =
@@ -65,10 +111,6 @@ pub fn first_release_candidate(
         else {
             continue;
         };
-
-        if !candidate.matches_constraints(package_name, constraints)? {
-            continue;
-        }
 
         if let Err(error) = platform::validate(&candidate.platform_requires, platform, package_name)
         {
@@ -79,36 +121,42 @@ pub fn first_release_candidate(
             continue;
         }
 
-        return Ok(candidate);
+        candidates.push(candidate);
     }
 
-    Err(no_matching_version_error(
-        package_name,
-        constraints,
-        platform,
-        &platform_rejections,
-    ))
+    Ok((candidates, platform_rejections))
 }
 
 impl PackagistRelease {
-    fn matches_constraints(&self, package_name: &str, constraints: &[String]) -> Result<bool> {
-        for constraint in constraints {
-            let matches =
-                semver_php::Semver::satisfies(&self.version, constraint).map_err(|error| {
-                    ConcertoError::resolution(
-                        package_name,
-                        constraints,
-                        format!("could not check package constraint: {error}"),
-                    )
-                })?;
-
-            if !matches {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
+    pub(crate) fn matches_constraints(
+        &self,
+        package_name: &str,
+        constraints: &[String],
+    ) -> Result<bool> {
+        version_matches_constraints(&self.version, package_name, constraints)
     }
+}
+
+fn version_matches_constraints(
+    version: &str,
+    package_name: &str,
+    constraints: &[String],
+) -> Result<bool> {
+    for constraint in constraints {
+        let matches = semver_php::Semver::satisfies(version, constraint).map_err(|error| {
+            ConcertoError::resolution(
+                package_name,
+                constraints,
+                format!("could not check package constraint: {error}"),
+            )
+        })?;
+
+        if !matches {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 fn release_candidate(
@@ -127,6 +175,10 @@ fn release_candidate(
                 "Packagist metadata does not contain a version for this release",
             )
         })?;
+
+    if !version_matches_constraints(version, package_name, constraints)? {
+        return Ok(None);
+    }
 
     let Some(dist_url) = release
         .get("dist")
@@ -156,6 +208,10 @@ fn release_requirements(
     let Some(require) = release.get("require") else {
         return Ok((Vec::new(), Vec::new()));
     };
+
+    if require.as_str().is_some_and(|value| value == "__unset") {
+        return Ok((Vec::new(), Vec::new()));
+    }
 
     let require = require.as_object().ok_or_else(|| {
         ConcertoError::resolution(

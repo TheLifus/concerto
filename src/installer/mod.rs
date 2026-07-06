@@ -14,7 +14,7 @@ use crate::resolver::{self, ResolvedPackages};
 use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 
-pub(super) const MAX_PARALLEL_WORKERS: usize = 8;
+pub(super) const MAX_PARALLEL_WORKERS: usize = 16;
 
 pub(super) struct PackageSourcePreparation {
     source: package_store::PackageSource,
@@ -115,11 +115,22 @@ fn install_from_resolution(
         )
     })?;
 
-    let resolved_packages =
-        resolver::resolve(&packages, context.platform, context.perf, context.reporter)?;
+    let mut speculative_preparer = resolved_install::SpeculativePreparer::new();
+    let resolved_packages = resolver::resolve_with_observer(
+        &packages,
+        context.platform,
+        context.perf,
+        context.reporter,
+        &mut speculative_preparer,
+    )?;
     validate_resolved_platform_requirements(&resolved_packages, context.platform)?;
     let package_count = resolved_packages.len();
-    resolved_install::install(&resolved_packages, context.perf, context.reporter)?;
+    resolved_install::install(
+        &resolved_packages,
+        context.perf,
+        context.reporter,
+        Some(speculative_preparer),
+    )?;
 
     let lockfile = build_lockfile(packages, resolved_packages);
     write_autoload(&lockfile, context.root_composer_json, context.perf)?;
@@ -183,29 +194,20 @@ fn prepare_package_source(
     name: &str,
     version: &str,
     dist_url: &str,
-    reporter: &InstallReporter,
 ) -> Result<PackageSourcePreparation> {
     let archive = PackageArchive { version, dist_url };
     let started_at = Instant::now();
     let source = package_store::prepare_source(name, archive)?;
-    let source_event = if source.is_reused() {
-        reporter.emit(InstallEventKind::SourceReused {
-            package: name.to_string(),
-            path: InstallReporter::path(source.path()),
-        });
+    let event = if source.is_reused() {
         "source_reuse"
     } else {
-        reporter.emit(InstallEventKind::SourcePrepared {
-            package: name.to_string(),
-            path: InstallReporter::path(source.path()),
-        });
         "source_download_extract"
     };
 
     Ok(PackageSourcePreparation {
         source,
         duration: started_at.elapsed(),
-        event: source_event,
+        event,
     })
 }
 

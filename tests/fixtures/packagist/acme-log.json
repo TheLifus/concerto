@@ -1,0 +1,24 @@
+{
+  "packages": {
+    "acme/log": [
+      {
+        "version": "3.0.0",
+        "dist": {
+          "url": "__ARCHIVE_BASE_URL__/psr-log-3.0.2.zip"
+        },
+        "require": {
+          "php": ">=8.0"
+        }
+      },
+      {
+        "version": "2.0.0",
+        "dist": {
+          "url": "__ARCHIVE_BASE_URL__/psr-log-3.0.2.zip"
+        },
+        "require": {
+          "php": ">=8.0"
+        }
+      }
+    ]
+  }
+}
