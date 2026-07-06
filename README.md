@@ -5,26 +5,33 @@
 <a href="LICENSE"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/license-MIT-2563eb.svg?mode=dark"><img alt="License MIT" src="https://shieldcn.dev/badge/license-MIT-2563eb.svg?mode=light"></picture></a>
 <a href="#current-status"><picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/badge/status-experimental-f97316.svg?mode=dark"><img alt="Status experimental" src="https://shieldcn.dev/badge/status-experimental-f97316.svg?mode=light"></picture></a>
 
-> PNPM-inspired package management for Composer projects, written in Rust.
+Concerto is an experimental Rust package manager for Composer projects.
 
-Concerto experiments with a fast install model for PHP dependencies:
+The goal is simple: keep Composer compatibility as the target, but use a
+PNPM-style install model where package sources are stored once per resolved
+version and linked into `vendor/`.
 
-- resolve packages from Packagist
-- keep extracted sources in a reusable store
-- symlink packages into `vendor/`
-- generate Composer-style autoload files
-- make lockfile installs extremely cheap
+```mermaid
+flowchart LR
+    composer["composer.json"] --> resolve["resolve versions"]
+    resolve --> lock["concerto.lock"]
+    resolve --> store[".concerto/store"]
+    store --> vendor["vendor/"]
+    lock --> relink["lockfile install"]
+    relink --> vendor
+```
 
-It is not production-ready yet.
+Concerto is not a Composer replacement yet. It is usable for testing the
+architecture and performance model, while compatibility work is still ongoing.
 
-## Quick Start
+## Quick start
 
 ```bash
 cargo build
 cargo run -- install
 ```
 
-With a `composer.json`:
+Example `composer.json`:
 
 ```json
 {
@@ -35,75 +42,106 @@ With a `composer.json`:
 }
 ```
 
-Concerto creates:
+Concerto writes:
 
 ```text
-.concerto/store/      # local package store
-vendor/               # symlinks to stored package sources
-vendor/autoload.php   # generated autoload entrypoint
-concerto.lock         # resolved package versions
+.concerto/store/      reusable package sources
+vendor/               symlinks to stored package sources
+vendor/autoload.php   generated autoload entrypoint
+concerto.lock         resolved package graph
 ```
+
+## Current status
+
+Concerto can already install common Packagist packages, resolve transitive
+dependencies, write a lockfile, relink from that lockfile, and generate a
+minimal Composer-style autoloader.
+
+| Area | Supported today |
+| --- | --- |
+| Package input | `composer.json` `require` |
+| Registry | Packagist metadata |
+| Resolution | Composer-like constraints, transitive dependencies, platform-aware selection |
+| Store | local `.concerto/store` with source reuse |
+| Install | `vendor/` symlinks, lockfile fast path |
+| Platform | `php`, installed `ext-*`; `lib-*` is reported as unsupported |
+| Autoload | `psr-4`, `psr-0`, `files`, `classmap` |
+| CLI | `install`, `--help`, `--version` |
+| Tests | unit tests, CLI tests, offline install fixtures, ignored E2E benchmarks |
+
+Still out of scope for now:
+
+- `require-dev`
+- `conflict`, `replace`, `provide`, `suggest`
+- custom repositories
+- Composer scripts and plugins
+- extension version constraints
+- global content-addressable store
+- full Composer solver parity
+
+## How install works
+
+```mermaid
+flowchart TD
+    root["read composer.json"] --> platform["detect PHP platform"]
+    platform --> lock{"lockfile matches?"}
+    lock -- yes --> locked["validate locked packages"]
+    locked --> relink["reuse store and relink vendor"]
+    lock -- no --> resolve["resolve package graph"]
+    resolve --> prepare["download or reuse archives"]
+    prepare --> write["write vendor, autoload and concerto.lock"]
+```
+
+The lockfile path is the important performance path: when `composer.json`
+matches `concerto.lock`, Concerto does not resolve dependencies again. It
+validates platform requirements, reuses the package store, relinks `vendor/`,
+and regenerates autoload files.
 
 The lockfile format is documented in [docs/lockfile.md](docs/lockfile.md).
 
-## Current Status
+## Autoload
 
-| Works today | Not yet |
-| --- | --- |
-| `composer.json` `require` parsing | platform-aware version selection |
-| Packagist metadata fetches | Composer scripts and plugins |
-| transitive package resolution | `require-dev` |
-| Composer-like version constraints | custom repositories |
-| local package store | extension version constraints |
-| `vendor/` symlinks | full Composer solver parity |
-| `concerto.lock` fast path | global content-addressable store |
-| basic platform enforcement | `lib-*` platform checks |
-| `psr-4`, `psr-0`, `files`, and `classmap` autoload | optimized Composer autoload parity |
-| performance benchmark script | production security hardening |
+Concerto generates:
 
-## Platform support
+- `vendor/autoload.php`
+- `vendor/concerto_autoload.php`
 
-Concerto validates platform requirements before installing resolved packages.
+The current autoloader supports `psr-4`, `psr-0`, `files`, and `classmap`.
+For `files`, Concerto loads dependency files before dependent package files,
+matching Composer's practical ordering requirement for package dependencies.
 
-Supported today:
+This is intentionally minimal. Optimized Composer autoload parity is separate
+future work.
 
-- `php`: checked against the local `php -r 'echo PHP_VERSION;'`
-- `ext-*`: presence checked against extensions listed by `php -m`
-- `lib-*`: detected but currently reported as unsupported
+## Platform checks
 
-If a requirement is not satisfied, install fails with the package name,
-requirement name, required constraint, and detected value.
+Concerto detects the local PHP platform before install:
 
-## Install Flow
+- `php` uses `php -r 'echo PHP_VERSION;'`
+- `ext-*` uses the loaded extension list from `php -m`
+- `lib-*` is recognized but currently fails as unsupported
 
-```mermaid
-flowchart TD
-    A["composer.json"] --> B["Root requirements"]
-    B --> C["Batched Packagist resolution"]
-    C --> D["Parallel source preparation"]
-    D --> E[".concerto/store"]
-    E --> F["vendor symlinks"]
-    F --> G["concerto.lock"]
+For deterministic tests and benchmarks, the detected platform can be overridden:
+
+```bash
+CONCERTO_PLATFORM_PHP=8.3.0 CONCERTO_PLATFORM_EXTENSIONS=json,mbstring concerto install
 ```
 
-```mermaid
-flowchart TD
-    A["composer.json"] --> B{"Lockfile matches?"}
-    B -- yes --> C["Read concerto.lock"]
-    C --> D["Reuse stored sources"]
-    D --> E["Relink vendor"]
-    B -- no --> F["Resolve and install"]
-```
+When a package cannot be installed, errors include the package name, failed
+requirement, expected constraint, and detected value.
 
 ## Performance
 
-Run the benchmark:
+Run the Composer comparison benchmark:
 
 ```bash
 scripts/bench-composer.sh
 ```
 
-Sample Docker result:
+The script runs Composer and Concerto in Docker so PHP and Composer versions are
+stable across machines.
+
+Example output:
 
 ```text
 Average over 6 cases (11 packages average):
@@ -112,99 +150,76 @@ Average over 6 cases (11 packages average):
   Vendor relink: Concerto averages 255ms.
 ```
 
-Benchmark caveats:
+Read the benchmark as a direction, not a contract. Concerto currently does less
+work than Composer, network timings vary, and Docker filesystem costs are part
+of the measurement.
 
-- Composer and Concerto run in Docker.
-- Concerto is built into a bench image based on the same `composer:2` image.
-- Composer uses `--ignore-platform-reqs`.
-- Concerto currently does less work than Composer.
-- Docker startup and mounted-volume filesystem costs are included.
-- Network timings vary.
-
-The key signal is the repeated install path: `concerto.lock` plus store reuse
-makes rebuilding `vendor/` very cheap.
-
-## Architecture
-
-| Module | Responsibility |
-| --- | --- |
-| `src/autoload/` | Composer-style autoload generation |
-| `src/composer/` | `composer.json` parsing and package validation |
-| `src/http/` | HTTP client setup |
-| `src/installer/` | install orchestration |
-| `src/lockfile/` | `concerto.lock` read/write and root matching |
-| `src/package_store/` | archive download, extraction, source reuse, links |
-| `src/packagist/` | Packagist metadata parsing and version selection |
-| `src/perf/` | optional performance logs |
-| `src/platform/` | PHP and extension requirement checks |
-| `src/resolver/` | dependency batches and constraint merging |
-
-Modules keep production code in `mod.rs` and unit tests in `tests.rs`.
-
-## Debug Logs
+## Debug performance logs
 
 ```bash
 CONCERTO_DEBUG_PERF=1 concerto install
 ```
 
-Logs append to:
+Logs are appended to:
 
 ```text
 .concerto/logs/perf.log
 ```
 
-Useful events:
+Useful events include `resolve_package`, `sources_prepare`,
+`source_download_extract`, `source_reuse`, `vendor_link`, `autoload_write`,
+`platform_current`, `lockfile_install`, and `lockfile_write`.
 
-```text
-resolve_package
-sources_prepare
-source_download_extract
-source_reuse
-vendor_link
-autoload_write
-platform_current
-lockfile_install
-lockfile_write
-```
+## Project layout
 
-## Quality Gates
+| Path | Purpose |
+| --- | --- |
+| `src/autoload/` | Composer-style autoload generation |
+| `src/composer/` | `composer.json` parsing and package validation |
+| `src/error.rs` | typed user-facing errors |
+| `src/http/` | HTTP client setup |
+| `src/installer/` | install orchestration |
+| `src/lockfile/` | lockfile read/write and root matching |
+| `src/package_store/` | archive download, extraction, reuse and vendor links |
+| `src/packagist/` | Packagist metadata parsing and version selection |
+| `src/perf/` | optional performance logs |
+| `src/platform/` | PHP and extension checks |
+| `src/resolver/` | dependency batches and constraint merging |
+| `tests/fixtures/` | offline Packagist and archive fixtures |
+
+Production modules keep implementation in `mod.rs` and colocated unit tests in
+`tests.rs`.
+
+## Quality checks
+
+Run before opening a pull request:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+cargo deny check
+git diff --check
 ```
 
-Manual E2E:
+Offline install tests:
+
+```bash
+cargo test --test install_offline
+```
+
+Ignored E2E checks:
 
 ```bash
 cargo test --test cli -- --ignored --test-threads=1
 ```
 
-## Roadmap
+## Documentation
 
-Production-grade next steps:
-
-- full platform parity, including extension versions and real `lib-*` checks
-- optimized Composer autoload parity
-- HTTP metadata cache
-- local Packagist fixtures for deterministic tests
-- CI quality gates
-- clearer install errors
-
-Later:
-
-- `require-dev`
-- `conflict`, `replace`, `provide`, `suggest`
-- custom repositories
-- global content-addressable store
-- garbage collection
-- Composer scripts/plugins strategy
-- stronger dependency solver
+- [Contributing](CONTRIBUTING.md)
+- [Lockfile format](docs/lockfile.md)
+- [Offline test fixtures](tests/fixtures/README.md)
 
 ## License
 
 MIT.
-
-[composer-badge]: https://img.shields.io/badge/Composer-compatible%20goal-885630?logo=composer
-[composer-url]: https://getcomposer.org/

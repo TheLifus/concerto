@@ -73,7 +73,13 @@ Concerto sorts root requirements and resolved packages by package name before
 writing the lockfile. This keeps lockfile diffs stable when dependency
 resolution returns the same result.
 
-## Limits
+## Platform requirements
 
-Version 1 does not enforce platform requirements yet. It records them so a
-future install step can validate `php`, `ext-*`, and `lib-*` constraints.
+Version 1 stores platform requirements on each locked package.
+
+Concerto validates supported platform requirements before installing from a
+lockfile:
+
+- `php` constraints are checked against the detected PHP version
+- `ext-*` requirements are checked against loaded PHP extensions
+- `lib-*` requirements are recognized but rejected as unsupported
