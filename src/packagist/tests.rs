@@ -106,6 +106,39 @@ fn skips_releases_that_do_not_match_constraint() {
 }
 
 #[test]
+fn skips_releases_without_dist_url() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "symfony/console": [
+            {
+                "version": "7.4.0"
+            },
+            {
+                "version": "7.3.0",
+                "dist": {
+                    "url": "https://example.com/7.3.0.zip"
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^7.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "symfony/console",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "7.3.0");
+    assert_eq!(release.dist_url, "https://example.com/7.3.0.zip");
+}
+
+#[test]
 fn skips_releases_with_unmet_php_requirement() {
     let metadata_json = r#"
 {

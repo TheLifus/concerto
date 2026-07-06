@@ -60,7 +60,11 @@ pub fn first_release_candidate(
     let mut platform_rejections = Vec::new();
 
     for release in versions {
-        let candidate = release_candidate(release, package_name, constraints, versions.len())?;
+        let Some(candidate) =
+            release_candidate(release, package_name, constraints, versions.len())?
+        else {
+            continue;
+        };
 
         if !candidate.matches_constraints(package_name, constraints)? {
             continue;
@@ -112,7 +116,7 @@ fn release_candidate(
     package_name: &str,
     constraints: &[String],
     version_count: usize,
-) -> Result<PackagistRelease> {
+) -> Result<Option<PackagistRelease>> {
     let version = release
         .get("version")
         .and_then(|version| version.as_str())
@@ -124,28 +128,24 @@ fn release_candidate(
             )
         })?;
 
-    let dist_url = release
+    let Some(dist_url) = release
         .get("dist")
         .and_then(|dist| dist.get("url"))
         .and_then(|url| url.as_str())
-        .ok_or_else(|| {
-            ConcertoError::resolution(
-                package_name,
-                constraints,
-                "Packagist metadata does not contain a dist url for this release",
-            )
-        })?;
+    else {
+        return Ok(None);
+    };
 
     let (package_requires, platform_requires) =
         release_requirements(release, package_name, constraints)?;
 
-    Ok(PackagistRelease {
+    Ok(Some(PackagistRelease {
         version_count,
         version: version.to_string(),
         dist_url: dist_url.to_string(),
         package_requires,
         platform_requires,
-    })
+    }))
 }
 
 fn release_requirements(
