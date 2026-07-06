@@ -87,6 +87,29 @@ fn offline_install(project: &Path, metadata_dir: &Path) -> Output {
 }
 
 #[test]
+fn offline_installs_direct_requirement() {
+    let project = temp_project("offline-direct");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/autoload.php").exists());
+    assert!(project.join("vendor/psr/log").exists());
+    assert!(!project.join("vendor/monolog/monolog").exists());
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "psr/log"), "3.0.2");
+    assert_eq!(lockfile["packages"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn offline_installs_transitive_requirement_and_relinks_from_lockfile() {
     let project = temp_project("offline-transitive");
     let metadata_dir = prepare_packagist_fixtures(&project);
@@ -123,6 +146,26 @@ fn offline_installs_transitive_requirement_and_relinks_from_lockfile() {
     assert!(stdout(&output).contains("Installing from lockfile"));
     assert!(project.join("vendor/monolog/monolog").exists());
     assert!(project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_rejects_unmatched_version_constraint() {
+    let project = temp_project("offline-version-conflict");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^2.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("psr/log"));
+    assert!(error.contains("^2.0"));
+    assert!(!project.join("vendor/psr/log").exists());
+    assert!(!project.join("concerto.lock").exists());
 }
 
 #[test]
