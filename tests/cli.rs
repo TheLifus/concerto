@@ -189,7 +189,7 @@ fn e2e_prints_install_stats_for_common_cases() {
             r#"{
               "require": {
                 "monolog/monolog": "^3.0",
-                "symfony/console": "^8.0",
+                "brick/math": "^0.14",
                 "guzzlehttp/guzzle": "^7.0",
                 "ramsey/uuid": "^4.0",
                 "league/flysystem": "^3.0"
