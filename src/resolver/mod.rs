@@ -3,7 +3,10 @@ use crate::http::get_text;
 use crate::packagist::{self, PackagistRelease};
 use crate::perf::PerfLogger;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+const PACKAGIST_FIXTURES_DIR_ENV: &str = "CONCERTO_PACKAGIST_FIXTURES_DIR";
 
 pub(crate) struct ResolvedPackageEntry {
     pub version: String,
@@ -129,8 +132,7 @@ fn resolve_package_batch(
 
 fn resolve_package(request: PackageResolveRequest) -> Result<ResolvedPackage, String> {
     let started_at = Instant::now();
-    let metadata_url = packagist::package_url(&request.name)?;
-    let metadata = get_text(&metadata_url)?;
+    let (metadata_url, metadata) = package_metadata(&request.name)?;
 
     let release =
         packagist::first_release_candidate(&metadata, &request.name, &request.constraints)?;
@@ -143,6 +145,31 @@ fn resolve_package(request: PackageResolveRequest) -> Result<ResolvedPackage, St
         metadata_size: metadata.len(),
         duration: started_at.elapsed(),
     })
+}
+
+fn package_metadata(package_name: &str) -> Result<(String, String), String> {
+    if let Ok(fixtures_dir) = std::env::var(PACKAGIST_FIXTURES_DIR_ENV) {
+        let path = fixture_metadata_path(Path::new(&fixtures_dir), package_name);
+        let content = std::fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "Could not read Packagist fixture for {} at {}: {}",
+                package_name,
+                path.display(),
+                error
+            )
+        })?;
+
+        return Ok((path.display().to_string(), content));
+    }
+
+    let metadata_url = packagist::package_url(package_name)?;
+    let metadata = get_text(&metadata_url)?;
+
+    Ok((metadata_url, metadata))
+}
+
+fn fixture_metadata_path(fixtures_dir: &Path, package_name: &str) -> PathBuf {
+    fixtures_dir.join(format!("{}.json", package_name.replace('/', "-")))
 }
 
 fn insert_resolved_package(

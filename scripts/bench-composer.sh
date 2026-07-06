@@ -218,7 +218,7 @@ bench_case "transitive" '{"require":{"monolog/monolog":"^3.0"}}'
 bench_case "multi-app" '{
   "require": {
     "monolog/monolog": "^3.0",
-    "symfony/console": "^8.0",
+    "brick/math": "^0.14",
     "guzzlehttp/guzzle": "^7.0",
     "ramsey/uuid": "^4.0",
     "league/flysystem": "^3.0"

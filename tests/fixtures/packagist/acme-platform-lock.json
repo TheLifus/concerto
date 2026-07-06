@@ -1,0 +1,15 @@
+{
+  "packages": {
+    "acme/platform-lock": [
+      {
+        "version": "1.0.0",
+        "dist": {
+          "url": "__ARCHIVE_BASE_URL__/psr-log-3.0.2.zip"
+        },
+        "require": {
+          "php": ">=999.0"
+        }
+      }
+    ]
+  }
+}

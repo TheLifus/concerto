@@ -1,6 +1,11 @@
 const USER_AGENT: &str = "concerto";
 
 pub fn get_text(url: &str) -> Result<String, String> {
+    if let Some(path) = file_url_path(url) {
+        return std::fs::read_to_string(path)
+            .map_err(|error| format!("Could not read local file: {error}"));
+    }
+
     client()
         .get(url)
         .send()
@@ -12,6 +17,10 @@ pub fn get_text(url: &str) -> Result<String, String> {
 }
 
 pub fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
+    if let Some(path) = file_url_path(url) {
+        return std::fs::read(path).map_err(|error| format!("Could not read local file: {error}"));
+    }
+
     client()
         .get(url)
         .send()
@@ -23,9 +32,16 @@ pub fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("Could not read download response: {error}"))
 }
 
+fn file_url_path(url: &str) -> Option<&str> {
+    url.strip_prefix("file://")
+}
+
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
         .build()
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
+
+#[cfg(test)]
+mod tests;
