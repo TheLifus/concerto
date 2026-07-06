@@ -73,13 +73,15 @@ fn platform_error(package_name: &str, requirement: &RequiredPackage, detected: &
 }
 
 pub(crate) fn current() -> Result<Platform, String> {
-    let php_version = command_output("php", &["-r", "echo PHP_VERSION;"])?;
-    let extensions = parse_extensions(&command_output("php", &["-m"])?);
+    let output = command_output(
+        "php",
+        &[
+            "-r",
+            "echo PHP_VERSION, PHP_EOL; foreach (get_loaded_extensions() as $extension) { echo $extension, PHP_EOL; }",
+        ],
+    )?;
 
-    Ok(Platform {
-        php_version: php_version.trim().to_string(),
-        extensions,
-    })
+    parse_platform(&output)
 }
 
 fn command_output(command: &str, arguments: &[&str]) -> Result<String, String> {
@@ -96,14 +98,23 @@ fn command_output(command: &str, arguments: &[&str]) -> Result<String, String> {
         .map_err(|error| format!("{command} output is not valid UTF-8: {error}"))
 }
 
-fn parse_extensions(output: &str) -> Vec<String> {
-    output
-        .lines()
+fn parse_platform(output: &str) -> Result<Platform, String> {
+    let mut lines = output.lines();
+    let php_version = lines
+        .next()
+        .ok_or_else(|| "Could not detect PHP version".to_string())?
+        .trim()
+        .to_string();
+    let extensions = lines
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter(|line| !line.starts_with('['))
         .map(str::to_lowercase)
-        .collect()
+        .collect();
+
+    Ok(Platform {
+        php_version,
+        extensions,
+    })
 }
 
 #[cfg(test)]
@@ -170,27 +181,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_php_extensions() {
-        let extensions = parse_extensions(
+    fn parses_platform_from_php_output() {
+        let platform = parse_platform(
             r#"
-                [PHP Modules]
-                Core
-                json
-                PDO
+8.3.1
+Core
+json
+PDO
+"#
+            .trim_start(),
+        )
+        .unwrap();
 
-                [Zend Modules]
-                Zend OPcache
-                "#,
-        );
-
+        assert_eq!(platform.php_version, "8.3.1");
         assert_eq!(
-            extensions,
-            vec![
-                "core".to_string(),
-                "json".to_string(),
-                "pdo".to_string(),
-                "zend opcache".to_string(),
-            ]
+            platform.extensions,
+            vec!["core".to_string(), "json".to_string(), "pdo".to_string()]
         );
     }
 

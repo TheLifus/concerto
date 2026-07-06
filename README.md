@@ -12,6 +12,7 @@ Concerto experiments with a fast install model for PHP dependencies:
 - resolve packages from Packagist
 - keep extracted sources in a reusable store
 - symlink packages into `vendor/`
+- generate Composer-style autoload files
 - make lockfile installs extremely cheap
 
 It is not production-ready yet.
@@ -39,6 +40,7 @@ Concerto creates:
 ```text
 .concerto/store/      # local package store
 vendor/               # symlinks to stored package sources
+vendor/autoload.php   # generated autoload entrypoint
 concerto.lock         # resolved package versions
 ```
 
@@ -48,7 +50,7 @@ The lockfile format is documented in [docs/lockfile.md](docs/lockfile.md).
 
 | Works today | Not yet |
 | --- | --- |
-| `composer.json` `require` parsing | Composer autoload generation |
+| `composer.json` `require` parsing | platform-aware version selection |
 | Packagist metadata fetches | Composer scripts and plugins |
 | transitive package resolution | `require-dev` |
 | Composer-like version constraints | custom repositories |
@@ -56,6 +58,7 @@ The lockfile format is documented in [docs/lockfile.md](docs/lockfile.md).
 | `vendor/` symlinks | full Composer solver parity |
 | `concerto.lock` fast path | global content-addressable store |
 | basic platform enforcement | `lib-*` platform checks |
+| `psr-4`, `psr-0`, `files`, and `classmap` autoload | optimized Composer autoload parity |
 | performance benchmark script | production security hardening |
 
 ## Platform support
@@ -128,6 +131,8 @@ makes rebuilding `vendor/` very cheap.
 | `src/resolver.rs` | dependency batches and constraint merging |
 | `src/package_store.rs` | archive download, extraction, source reuse, links |
 | `src/lockfile.rs` | `concerto.lock` read/write and root matching |
+| `src/autoload/` | Composer-style autoload generation |
+| `src/platform.rs` | PHP and extension requirement checks |
 | `src/perf.rs` | optional performance logs |
 | `src/installer.rs` | install orchestration |
 
@@ -151,6 +156,8 @@ sources_prepare
 source_download_extract
 source_reuse
 vendor_link
+autoload_write
+platform_current
 lockfile_install
 lockfile_write
 ```
@@ -173,10 +180,8 @@ cargo test --test cli -- --ignored --test-threads=1
 
 Production-grade next steps:
 
-- versioned lockfile format
-- root requirement hash in `concerto.lock`
 - full platform parity, including extension versions and real `lib-*` checks
-- Composer-compatible autoload generation
+- optimized Composer autoload parity
 - HTTP metadata cache
 - local Packagist fixtures for deterministic tests
 - CI quality gates
