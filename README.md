@@ -124,17 +124,20 @@ makes rebuilding `vendor/` very cheap.
 
 ## Architecture
 
-| File | Responsibility |
+| Module | Responsibility |
 | --- | --- |
-| `src/composer.rs` | `composer.json` parsing and package validation |
-| `src/packagist.rs` | Packagist metadata parsing and version selection |
-| `src/resolver.rs` | dependency batches and constraint merging |
-| `src/package_store.rs` | archive download, extraction, source reuse, links |
-| `src/lockfile.rs` | `concerto.lock` read/write and root matching |
 | `src/autoload/` | Composer-style autoload generation |
-| `src/platform.rs` | PHP and extension requirement checks |
-| `src/perf.rs` | optional performance logs |
-| `src/installer.rs` | install orchestration |
+| `src/composer/` | `composer.json` parsing and package validation |
+| `src/http/` | HTTP client setup |
+| `src/installer/` | install orchestration |
+| `src/lockfile/` | `concerto.lock` read/write and root matching |
+| `src/package_store/` | archive download, extraction, source reuse, links |
+| `src/packagist/` | Packagist metadata parsing and version selection |
+| `src/perf/` | optional performance logs |
+| `src/platform/` | PHP and extension requirement checks |
+| `src/resolver/` | dependency batches and constraint merging |
+
+Modules keep production code in `mod.rs` and unit tests in `tests.rs`.
 
 ## Debug Logs
 
