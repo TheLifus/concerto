@@ -65,6 +65,7 @@ fn fails_install_without_composer_json() {
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains(NO_COMPOSER_JSON));
+    assert!(stderr(&output).contains("Run concerto from a Composer project directory"));
 }
 
 #[test]
@@ -80,6 +81,24 @@ fn fails_install_when_require_is_missing() {
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains(REQUIRE_MUST_BE_OBJECT));
+    assert!(stderr(&output).contains("Check composer.json"));
+}
+
+#[test]
+fn fails_install_when_composer_json_cannot_be_read() {
+    let project = temp_project("unreadable-composer-json");
+    std::fs::create_dir(project.join("composer.json")).unwrap();
+
+    let output = concerto_command()
+        .arg("install")
+        .current_dir(project)
+        .output()
+        .unwrap();
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Could not read composer.json"));
+    assert!(!error.contains(NO_COMPOSER_JSON));
 }
 
 #[test]

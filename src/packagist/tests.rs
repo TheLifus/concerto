@@ -255,7 +255,8 @@ fn rejects_when_no_release_matches_platform() {
         &constraints,
         &platform("8.2.25", &[]),
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
 
     assert!(error.contains("symfony/console"));
     assert!(error.contains("^7.0"));
@@ -331,10 +332,46 @@ fn rejects_when_no_release_matches_all_constraints() {
         &constraints,
         &platform("8.2.0", &[]),
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
 
     assert!(error.contains("psr/log"));
     assert!(error.contains("^3.0, ^2.0"));
+}
+
+#[test]
+fn reports_invalid_packagist_require_without_composer_json_hint() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "acme/package": [
+            {
+                "version": "1.0.0",
+                "dist": {
+                    "url": "https://example.com/1.0.0.zip"
+                },
+                "require": {
+                    "psr/log": false
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^1.0"]);
+    let error = first_release_candidate(
+        metadata_json,
+        "acme/package",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("acme/package"));
+    assert!(error.contains("package constraint for psr/log must be a string"));
+    assert!(!error.contains("Check composer.json"));
 }
 
 #[test]

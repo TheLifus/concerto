@@ -15,7 +15,9 @@ fn rejects_unmet_php_requirement() {
     let requirements = vec![required_package("php", ">=8.4")];
     let platform = platform("8.3.0", &[]);
 
-    let error = validate(&requirements, &platform, "symfony/console").unwrap_err();
+    let error = validate(&requirements, &platform, "symfony/console")
+        .unwrap_err()
+        .to_string();
 
     assert!(error.contains("symfony/console"));
     assert!(error.contains("php"));
@@ -38,7 +40,9 @@ fn rejects_missing_extension_requirement() {
     let requirements = vec![required_package("ext-intl", "*")];
     let platform = platform("8.3.0", &["json"]);
 
-    let error = validate(&requirements, &platform, "symfony/console").unwrap_err();
+    let error = validate(&requirements, &platform, "symfony/console")
+        .unwrap_err()
+        .to_string();
 
     assert!(error.contains("symfony/console"));
     assert!(error.contains("ext-intl"));
@@ -51,7 +55,9 @@ fn rejects_library_requirement_as_unsupported() {
     let requirements = vec![required_package("lib-icu", ">=70")];
     let platform = platform("8.3.0", &[]);
 
-    let error = validate(&requirements, &platform, "symfony/intl").unwrap_err();
+    let error = validate(&requirements, &platform, "symfony/intl")
+        .unwrap_err()
+        .to_string();
 
     assert!(error.contains("symfony/intl"));
     assert!(error.contains("lib-icu"));

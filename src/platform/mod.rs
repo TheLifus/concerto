@@ -1,4 +1,5 @@
 use crate::composer::RequiredPackage;
+use crate::error::{ConcertoError, Result};
 use std::process::Command;
 
 const PLATFORM_EXTENSIONS_ENV: &str = "CONCERTO_PLATFORM_EXTENSIONS";
@@ -16,7 +17,7 @@ pub(crate) fn validate(
     requirements: &[RequiredPackage],
     platform: &Platform,
     package_name: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     for requirement in requirements {
         let requirement_name = requirement.name.to_lowercase();
 
@@ -36,9 +37,11 @@ fn validate_php_requirement(
     requirement: &RequiredPackage,
     platform: &Platform,
     package_name: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     let matches = semver_php::Semver::satisfies(&platform.php_version, &requirement.constraint)
-        .map_err(|error| format!("Could not check php requirement: {error}"))?;
+        .map_err(|error| {
+            ConcertoError::platform_detection(format!("Could not check php requirement: {error}"))
+        })?;
 
     if matches {
         return Ok(());
@@ -55,7 +58,7 @@ fn validate_extension_requirement(
     requirement: &RequiredPackage,
     platform: &Platform,
     package_name: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     let requirement_name = requirement.name.to_lowercase();
     let extension = requirement_name.trim_start_matches("ext-");
 
@@ -70,14 +73,19 @@ fn validate_extension_requirement(
     Err(platform_error(package_name, requirement, "missing"))
 }
 
-fn platform_error(package_name: &str, requirement: &RequiredPackage, detected: &str) -> String {
-    format!(
-        "{package_name}: {} {} required, detected {detected}",
-        requirement.name, requirement.constraint
+fn platform_error(
+    package_name: &str,
+    requirement: &RequiredPackage,
+    detected: &str,
+) -> ConcertoError {
+    ConcertoError::platform(
+        package_name,
+        format!("{} {}", requirement.name, requirement.constraint),
+        detected,
     )
 }
 
-pub(crate) fn current() -> Result<Platform, String> {
+pub(crate) fn current() -> Result<Platform> {
     if let Ok(php_version) = std::env::var(PLATFORM_PHP_ENV) {
         return Ok(Platform {
             php_version,
@@ -90,25 +98,31 @@ pub(crate) fn current() -> Result<Platform, String> {
     parse_platform(&output)
 }
 
-fn command_output(command: &str, arguments: &[&str]) -> Result<String, String> {
+fn command_output(command: &str, arguments: &[&str]) -> Result<String> {
     let output = Command::new(command)
         .args(arguments)
         .output()
-        .map_err(|error| format!("Could not run {command}: {error}"))?;
+        .map_err(|error| {
+            ConcertoError::platform_detection(format!("Could not run {command}: {error}"))
+        })?;
 
     if !output.status.success() {
-        return Err(format!("{command} exited with {}", output.status));
+        return Err(ConcertoError::platform_detection(format!(
+            "{command} exited with {}",
+            output.status
+        )));
     }
 
-    String::from_utf8(output.stdout)
-        .map_err(|error| format!("{command} output is not valid UTF-8: {error}"))
+    String::from_utf8(output.stdout).map_err(|error| {
+        ConcertoError::platform_detection(format!("{command} output is not valid UTF-8: {error}"))
+    })
 }
 
-fn parse_platform(output: &str) -> Result<Platform, String> {
+fn parse_platform(output: &str) -> Result<Platform> {
     let mut lines = output.lines();
     let php_version = lines
         .next()
-        .ok_or_else(|| "Could not detect PHP version".to_string())?
+        .ok_or_else(|| ConcertoError::platform_detection("Could not detect PHP version"))?
         .trim()
         .to_string();
     let extensions = lines

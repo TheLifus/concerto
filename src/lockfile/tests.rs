@@ -86,7 +86,7 @@ fn rejects_unsupported_lockfile_version() {
 }
 "#;
 
-    let error = parse(content).unwrap_err();
+    let error = parse(content).unwrap_err().to_string();
 
     assert!(error.contains("Unsupported lockfile version: 2"));
 }
@@ -102,7 +102,7 @@ fn rejects_mismatched_root_requirements_hash() {
 }
 "#;
 
-    let error = parse(content).unwrap_err();
+    let error = parse(content).unwrap_err().to_string();
 
     assert!(error.contains("Lockfile root requirements hash does not match requirements"));
 }
