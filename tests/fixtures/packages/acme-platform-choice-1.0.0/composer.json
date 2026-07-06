@@ -1,0 +1,12 @@
+{
+  "name": "acme/platform-choice",
+  "version": "1.0.0",
+  "autoload": {
+    "psr-4": {
+      "Acme\\PlatformChoice\\": "src/"
+    }
+  },
+  "require": {
+    "php": ">=8.0"
+  }
+}

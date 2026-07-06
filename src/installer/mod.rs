@@ -62,7 +62,7 @@ pub fn install() -> Result<(), String> {
     std::fs::create_dir_all("vendor")
         .map_err(|error| format!("Could not create vendor directory: {error}"))?;
 
-    let resolved_packages = resolver::resolve(&packages, &perf)?;
+    let resolved_packages = resolver::resolve(&packages, &platform, &perf)?;
     validate_resolved_platform_requirements(&resolved_packages, &platform)?;
     let package_count = resolved_packages.len();
     resolved_install::install(&resolved_packages, &perf)?;

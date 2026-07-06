@@ -2,6 +2,7 @@ use crate::composer::RequiredPackage;
 use crate::http::get_text;
 use crate::packagist::{self, PackagistRelease};
 use crate::perf::PerfLogger;
+use crate::platform::Platform;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -36,6 +37,7 @@ pub(crate) type ResolvedPackages = HashMap<String, ResolvedPackageEntry>;
 
 pub(crate) fn resolve(
     root_packages: &[RequiredPackage],
+    platform: &Platform,
     perf: &PerfLogger,
 ) -> Result<ResolvedPackages, String> {
     let mut package_constraints = PackageConstraints::new();
@@ -58,7 +60,7 @@ pub(crate) fn resolve(
             continue;
         }
 
-        for package in resolve_package_batch(requests)? {
+        for package in resolve_package_batch(requests, platform)? {
             insert_resolved_package(
                 package,
                 &mut package_constraints,
@@ -110,11 +112,12 @@ fn take_resolve_requests(
 
 fn resolve_package_batch(
     requests: Vec<PackageResolveRequest>,
+    platform: &Platform,
 ) -> Result<Vec<ResolvedPackage>, String> {
     std::thread::scope(|scope| {
         let handles = requests
             .into_iter()
-            .map(|request| scope.spawn(move || resolve_package(request)))
+            .map(|request| scope.spawn(move || resolve_package(request, platform)))
             .collect::<Vec<_>>();
 
         let mut resolved = Vec::with_capacity(handles.len());
@@ -130,12 +133,19 @@ fn resolve_package_batch(
     })
 }
 
-fn resolve_package(request: PackageResolveRequest) -> Result<ResolvedPackage, String> {
+fn resolve_package(
+    request: PackageResolveRequest,
+    platform: &Platform,
+) -> Result<ResolvedPackage, String> {
     let started_at = Instant::now();
     let (metadata_url, metadata) = package_metadata(&request.name)?;
 
-    let release =
-        packagist::first_release_candidate(&metadata, &request.name, &request.constraints)?;
+    let release = packagist::first_release_candidate(
+        &metadata,
+        &request.name,
+        &request.constraints,
+        platform,
+    )?;
 
     Ok(ResolvedPackage {
         name: request.name,
