@@ -30,7 +30,12 @@ fn prepare_packagist_fixtures(project: &Path) -> PathBuf {
 
     std::fs::create_dir_all(&metadata_dir).unwrap();
 
-    for fixture in ["psr-log", "monolog-monolog", "acme-platform-lock"] {
+    for fixture in [
+        "psr-log",
+        "monolog-monolog",
+        "acme-platform-lock",
+        "acme-platform-choice",
+    ] {
         let content = std::fs::read_to_string(fixture_path(&format!(
             "tests/fixtures/packagist/{fixture}.json"
         )))
@@ -242,8 +247,28 @@ fn offline_rejects_unmet_platform_requirement() {
 
     assert!(!output.status.success());
     assert!(error.contains("acme/platform-lock"));
-    assert!(error.contains("php"));
-    assert!(error.contains(">=999.0"));
-    assert!(error.contains("8.2.25"));
+    assert!(error.contains("^1.0"));
+    assert!(error.contains("current platform"));
+    assert!(error.contains("php 8.2.25"));
     assert!(!project.join("vendor/acme/platform-lock").exists());
+}
+
+#[test]
+fn offline_selects_older_platform_compatible_release() {
+    let project = temp_project("offline-platform-choice");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"acme/platform-choice":"^1.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/acme/platform-choice").exists());
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "acme/platform-choice"), "1.0.0");
 }

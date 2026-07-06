@@ -1,7 +1,18 @@
 use super::*;
+use crate::platform::Platform;
 
 fn constraints(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
+}
+
+fn platform(php_version: &str, extensions: &[&str]) -> Platform {
+    Platform {
+        php_version: php_version.to_string(),
+        extensions: extensions
+            .iter()
+            .map(|extension| extension.to_string())
+            .collect(),
+    }
 }
 
 #[test]
@@ -35,7 +46,13 @@ fn reads_first_release_candidate() {
     "#;
 
     let constraints = constraints(&["^3.0"]);
-    let release = first_release_candidate(metadata_json, "monolog/monolog", &constraints).unwrap();
+    let release = first_release_candidate(
+        metadata_json,
+        "monolog/monolog",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
 
     assert_eq!(release.version_count, 2);
     assert_eq!(release.version, "3.9.0");
@@ -76,10 +93,176 @@ fn skips_releases_that_do_not_match_constraint() {
 "#;
 
     let constraints = constraints(&["^3.0"]);
-    let release = first_release_candidate(metadata_json, "monolog/monolog", &constraints).unwrap();
+    let release = first_release_candidate(
+        metadata_json,
+        "monolog/monolog",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
 
     assert_eq!(release.version, "3.8.1");
     assert_eq!(release.dist_url, "https://example.com/3.8.1.zip");
+}
+
+#[test]
+fn skips_releases_with_unmet_php_requirement() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "symfony/console": [
+            {
+                "version": "7.4.0",
+                "dist": {
+                    "url": "https://example.com/7.4.0.zip"
+                },
+                "require": {
+                    "php": ">=8.4"
+                }
+            },
+            {
+                "version": "7.3.0",
+                "dist": {
+                    "url": "https://example.com/7.3.0.zip"
+                },
+                "require": {
+                    "php": ">=8.2"
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^7.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "symfony/console",
+        &constraints,
+        &platform("8.2.25", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "7.3.0");
+    assert_eq!(release.dist_url, "https://example.com/7.3.0.zip");
+}
+
+#[test]
+fn skips_releases_with_missing_extension_requirement() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "acme/package": [
+            {
+                "version": "1.1.0",
+                "dist": {
+                    "url": "https://example.com/1.1.0.zip"
+                },
+                "require": {
+                    "ext-intl": "*"
+                }
+            },
+            {
+                "version": "1.0.0",
+                "dist": {
+                    "url": "https://example.com/1.0.0.zip"
+                },
+                "require": {
+                    "ext-json": "*"
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^1.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "acme/package",
+        &constraints,
+        &platform("8.2.25", &["json"]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "1.0.0");
+    assert_eq!(release.dist_url, "https://example.com/1.0.0.zip");
+}
+
+#[test]
+fn skips_releases_with_unsupported_library_requirement() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "acme/package": [
+            {
+                "version": "1.1.0",
+                "dist": {
+                    "url": "https://example.com/1.1.0.zip"
+                },
+                "require": {
+                    "lib-icu": "*"
+                }
+            },
+            {
+                "version": "1.0.0",
+                "dist": {
+                    "url": "https://example.com/1.0.0.zip"
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^1.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "acme/package",
+        &constraints,
+        &platform("8.2.25", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "1.0.0");
+    assert_eq!(release.dist_url, "https://example.com/1.0.0.zip");
+}
+
+#[test]
+fn rejects_when_no_release_matches_platform() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "symfony/console": [
+            {
+                "version": "7.4.0",
+                "dist": {
+                    "url": "https://example.com/7.4.0.zip"
+                },
+                "require": {
+                    "php": ">=8.4"
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^7.0"]);
+    let error = first_release_candidate(
+        metadata_json,
+        "symfony/console",
+        &constraints,
+        &platform("8.2.25", &[]),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("symfony/console"));
+    assert!(error.contains("^7.0"));
+    assert!(error.contains("current platform"));
+    assert!(error.contains("php 8.2.25"));
+    assert!(error.contains("7.4.0"));
+    assert!(error.contains("php >=8.4 required, detected 8.2.25"));
 }
 
 #[test]
@@ -106,7 +289,13 @@ fn selects_release_matching_all_constraints() {
 "#;
 
     let constraints = constraints(&["^2.0 || ^3.0", "^2.0"]);
-    let release = first_release_candidate(metadata_json, "psr/log", &constraints).unwrap();
+    let release = first_release_candidate(
+        metadata_json,
+        "psr/log",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
 
     assert_eq!(release.version, "2.0.0");
     assert_eq!(release.dist_url, "https://example.com/2.0.0.zip");
@@ -136,7 +325,13 @@ fn rejects_when_no_release_matches_all_constraints() {
 "#;
 
     let constraints = constraints(&["^3.0", "^2.0"]);
-    let error = first_release_candidate(metadata_json, "psr/log", &constraints).unwrap_err();
+    let error = first_release_candidate(
+        metadata_json,
+        "psr/log",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap_err();
 
     assert!(error.contains("psr/log"));
     assert!(error.contains("^3.0, ^2.0"));
@@ -164,7 +359,13 @@ fn reads_release_requirements() {
 "#;
 
     let constraints = constraints(&["^3.0"]);
-    let release = first_release_candidate(metadata_json, "monolog/monolog", &constraints).unwrap();
+    let release = first_release_candidate(
+        metadata_json,
+        "monolog/monolog",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
 
     assert_eq!(
         release.package_requires,
