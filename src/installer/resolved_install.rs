@@ -1,5 +1,6 @@
-use super::{PackageSourcePreparation, prepare_package_source, print_install_summary};
+use super::{MAX_PARALLEL_WORKERS, PackageSourcePreparation, prepare_package_source};
 use crate::error::{ConcertoError, Result};
+use crate::install_event::{InstallEventKind, InstallReporter};
 use crate::package_store;
 use crate::perf::PerfLogger;
 use crate::resolver::{ResolvedPackageEntry, ResolvedPackages};
@@ -7,16 +8,19 @@ use std::time::{Duration, Instant};
 
 struct PreparedPackage {
     name: String,
-    constraint: String,
-    metadata_url: String,
+    version: String,
     source: package_store::PackageSource,
     source_duration: Duration,
     source_event: &'static str,
 }
 
-pub(super) fn install(resolved_packages: &ResolvedPackages, perf: &PerfLogger) -> Result<()> {
+pub(super) fn install(
+    resolved_packages: &ResolvedPackages,
+    perf: &PerfLogger,
+    reporter: &InstallReporter,
+) -> Result<()> {
     let prepare_started_at = Instant::now();
-    let prepared_packages = prepare_sources(resolved_packages)?;
+    let prepared_packages = prepare_sources(resolved_packages, reporter)?;
 
     perf.log(
         "sources_prepare",
@@ -25,13 +29,17 @@ pub(super) fn install(resolved_packages: &ResolvedPackages, perf: &PerfLogger) -
     )?;
 
     for package in prepared_packages {
-        install_prepared_package(package, perf)?;
+        install_prepared_package(package, perf, reporter)?;
     }
 
     Ok(())
 }
 
-fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Result<()> {
+fn install_prepared_package(
+    package: PreparedPackage,
+    perf: &PerfLogger,
+    reporter: &InstallReporter,
+) -> Result<()> {
     perf.log(
         package.source_event,
         package.source_duration,
@@ -45,25 +53,45 @@ fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Resu
         link_started_at.elapsed(),
         &[("package", package.name.clone())],
     )?;
-    print_install_summary(
-        &package.name,
-        &package.constraint,
-        package.source.path(),
-        &package.metadata_url,
-    );
+    reporter.emit(InstallEventKind::VendorLinked {
+        package: package.name,
+        version: package.version,
+        path: InstallReporter::path(package.source.path()),
+    });
 
     Ok(())
 }
 
-fn prepare_sources(resolved_packages: &ResolvedPackages) -> Result<Vec<PreparedPackage>> {
+fn prepare_sources(
+    resolved_packages: &ResolvedPackages,
+    reporter: &InstallReporter,
+) -> Result<Vec<PreparedPackage>> {
     let mut packages = resolved_packages.iter().collect::<Vec<_>>();
 
     packages.sort_by(|left, right| left.0.cmp(right.0));
 
+    let mut prepared = Vec::with_capacity(packages.len());
+
+    for batch in packages.chunks(MAX_PARALLEL_WORKERS) {
+        let mut batch = prepare_source_batch(batch, reporter)?;
+        prepared.append(&mut batch);
+    }
+
+    Ok(prepared)
+}
+
+fn prepare_source_batch(
+    packages: &[(&String, &ResolvedPackageEntry)],
+    reporter: &InstallReporter,
+) -> Result<Vec<PreparedPackage>> {
     std::thread::scope(|scope| {
         let handles = packages
-            .into_iter()
-            .map(|(name, package)| scope.spawn(move || prepare_source(name, package)))
+            .iter()
+            .map(|&(name, package)| {
+                let reporter = reporter.clone();
+
+                scope.spawn(move || prepare_source(name, package, &reporter))
+            })
             .collect::<Vec<_>>();
 
         let mut prepared = Vec::with_capacity(handles.len());
@@ -79,17 +107,20 @@ fn prepare_sources(resolved_packages: &ResolvedPackages) -> Result<Vec<PreparedP
     })
 }
 
-fn prepare_source(name: &str, package: &ResolvedPackageEntry) -> Result<PreparedPackage> {
+fn prepare_source(
+    name: &str,
+    package: &ResolvedPackageEntry,
+    reporter: &InstallReporter,
+) -> Result<PreparedPackage> {
     let PackageSourcePreparation {
         source,
         duration,
         event,
-    } = prepare_package_source(name, &package.version, &package.dist_url)?;
+    } = prepare_package_source(name, &package.version, &package.dist_url, reporter)?;
 
     Ok(PreparedPackage {
         name: name.to_string(),
-        constraint: package.constraints.join(", "),
-        metadata_url: package.metadata_url.clone(),
+        version: package.version.clone(),
         source,
         source_duration: duration,
         source_event: event,

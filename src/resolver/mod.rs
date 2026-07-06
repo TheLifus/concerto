@@ -1,6 +1,7 @@
 use crate::composer::RequiredPackage;
 use crate::error::{ConcertoError, Result};
 use crate::http::get_text;
+use crate::install_event::{InstallEventKind, InstallReporter};
 use crate::packagist::{self, PackagistRelease};
 use crate::perf::PerfLogger;
 use crate::platform::Platform;
@@ -9,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const PACKAGIST_FIXTURES_DIR_ENV: &str = "CONCERTO_PACKAGIST_FIXTURES_DIR";
+const MAX_PARALLEL_RESOLVERS: usize = 8;
 
 pub(crate) struct ResolvedPackageEntry {
     pub version: String,
     pub dist_url: String,
-    pub metadata_url: String,
     pub constraints: Vec<String>,
     pub package_requires: Vec<RequiredPackage>,
     pub platform_requires: Vec<RequiredPackage>,
@@ -28,9 +29,16 @@ struct ResolvedPackage {
     name: String,
     constraints: Vec<String>,
     release: PackagistRelease,
-    metadata_url: String,
     metadata_size: usize,
     duration: Duration,
+}
+
+struct ResolveState<'a> {
+    package_constraints: &'a mut PackageConstraints,
+    resolved_packages: &'a mut ResolvedPackages,
+    pending: &'a mut Vec<String>,
+    perf: &'a PerfLogger,
+    reporter: &'a InstallReporter,
 }
 
 type PackageConstraints = HashMap<String, Vec<String>>;
@@ -40,6 +48,7 @@ pub(crate) fn resolve(
     root_packages: &[RequiredPackage],
     platform: &Platform,
     perf: &PerfLogger,
+    reporter: &InstallReporter,
 ) -> Result<ResolvedPackages> {
     let mut package_constraints = PackageConstraints::new();
 
@@ -61,14 +70,16 @@ pub(crate) fn resolve(
             continue;
         }
 
+        let mut state = ResolveState {
+            package_constraints: &mut package_constraints,
+            resolved_packages: &mut resolved_packages,
+            pending: &mut pending,
+            perf,
+            reporter,
+        };
+
         for package in resolve_package_batch(requests, platform)? {
-            insert_resolved_package(
-                package,
-                &mut package_constraints,
-                &mut resolved_packages,
-                &mut pending,
-                perf,
-            )?;
+            insert_resolved_package(package, &mut state)?;
         }
     }
 
@@ -119,6 +130,28 @@ fn resolve_package_batch(
     requests: Vec<PackageResolveRequest>,
     platform: &Platform,
 ) -> Result<Vec<ResolvedPackage>> {
+    let mut requests = requests.into_iter();
+    let mut resolved = Vec::new();
+
+    loop {
+        let batch = requests
+            .by_ref()
+            .take(MAX_PARALLEL_RESOLVERS)
+            .collect::<Vec<_>>();
+
+        if batch.is_empty() {
+            return Ok(resolved);
+        }
+
+        let mut batch = resolve_package_batch_chunk(batch, platform)?;
+        resolved.append(&mut batch);
+    }
+}
+
+fn resolve_package_batch_chunk(
+    requests: Vec<PackageResolveRequest>,
+    platform: &Platform,
+) -> Result<Vec<ResolvedPackage>> {
     std::thread::scope(|scope| {
         let handles = requests
             .into_iter()
@@ -140,7 +173,7 @@ fn resolve_package_batch(
 
 fn resolve_package(request: PackageResolveRequest, platform: &Platform) -> Result<ResolvedPackage> {
     let started_at = Instant::now();
-    let (metadata_url, metadata) = package_metadata(&request.name, &request.constraints)?;
+    let metadata = package_metadata(&request.name, &request.constraints)?;
 
     let release = packagist::first_release_candidate(
         &metadata,
@@ -153,13 +186,12 @@ fn resolve_package(request: PackageResolveRequest, platform: &Platform) -> Resul
         name: request.name,
         constraints: request.constraints,
         release,
-        metadata_url,
         metadata_size: metadata.len(),
         duration: started_at.elapsed(),
     })
 }
 
-fn package_metadata(package_name: &str, constraints: &[String]) -> Result<(String, String)> {
+fn package_metadata(package_name: &str, constraints: &[String]) -> Result<String> {
     if let Ok(fixtures_dir) = std::env::var(PACKAGIST_FIXTURES_DIR_ENV) {
         let path = fixture_metadata_path(Path::new(&fixtures_dir), package_name);
         let content = std::fs::read_to_string(&path).map_err(|error| {
@@ -174,7 +206,7 @@ fn package_metadata(package_name: &str, constraints: &[String]) -> Result<(Strin
             )
         })?;
 
-        return Ok((path.display().to_string(), content));
+        return Ok(content);
     }
 
     let metadata_url = packagist::package_url(package_name)?;
@@ -186,22 +218,19 @@ fn package_metadata(package_name: &str, constraints: &[String]) -> Result<(Strin
         )
     })?;
 
-    Ok((metadata_url, metadata))
+    Ok(metadata)
 }
 
 fn fixture_metadata_path(fixtures_dir: &Path, package_name: &str) -> PathBuf {
     fixtures_dir.join(format!("{}.json", package_name.replace('/', "-")))
 }
 
-fn insert_resolved_package(
-    resolved: ResolvedPackage,
-    package_constraints: &mut PackageConstraints,
-    resolved_packages: &mut ResolvedPackages,
-    pending: &mut Vec<String>,
-    perf: &PerfLogger,
-) -> Result<()> {
-    println!("Fetched {} bytes", resolved.metadata_size);
-    perf.log(
+fn insert_resolved_package(resolved: ResolvedPackage, state: &mut ResolveState<'_>) -> Result<()> {
+    state.reporter.emit(InstallEventKind::MetadataFetched {
+        package: resolved.name.clone(),
+        bytes: resolved.metadata_size,
+    });
+    state.perf.log(
         "resolve_package",
         resolved.duration,
         &[
@@ -209,17 +238,22 @@ fn insert_resolved_package(
             ("version", resolved.release.version.clone()),
         ],
     )?;
-    print_release(&resolved.release);
-    print_requirements(&resolved.release);
+    state.reporter.emit(InstallEventKind::PackageResolved {
+        package: resolved.name.clone(),
+        version: resolved.release.version.clone(),
+        version_count: resolved.release.version_count,
+        package_requirements: resolved.release.package_requires.len(),
+        platform_requirements: resolved.release.platform_requires.len(),
+        dist_url: resolved.release.dist_url.clone(),
+    });
 
     let package_requires = resolved.release.package_requires.clone();
 
-    resolved_packages.insert(
+    state.resolved_packages.insert(
         resolved.name.clone(),
         ResolvedPackageEntry {
             version: resolved.release.version.clone(),
             dist_url: resolved.release.dist_url.clone(),
-            metadata_url: resolved.metadata_url.clone(),
             constraints: resolved.constraints,
             package_requires: resolved.release.package_requires,
             platform_requires: resolved.release.platform_requires,
@@ -227,8 +261,8 @@ fn insert_resolved_package(
     );
 
     for requirement in package_requires {
-        add_package_constraint(package_constraints, &requirement);
-        pending.push(requirement.name);
+        add_package_constraint(state.package_constraints, &requirement);
+        state.pending.push(requirement.name);
     }
 
     Ok(())
@@ -256,11 +290,6 @@ fn ensure_resolved_package_matches(
     }
 
     if satisfies {
-        println!(
-            "Skipping already installed {} {}",
-            package_name, resolved_package.version
-        );
-
         return Ok(());
     }
 
@@ -274,31 +303,4 @@ fn ensure_resolved_package_matches(
             constraints.join(", ")
         ),
     ))
-}
-
-fn print_release(release: &PackagistRelease) {
-    println!("Found {} versions", release.version_count);
-    println!("Selected {}", release.version);
-    println!("Requires {} packages", release.package_requires.len());
-    println!(
-        "Requires {} platform packages",
-        release.platform_requires.len()
-    );
-    println!("Dist {}", release.dist_url);
-}
-
-fn print_requirements(release: &PackagistRelease) {
-    for requirement in &release.package_requires {
-        println!(
-            "Package requirement: {} {}",
-            requirement.name, requirement.constraint
-        );
-    }
-
-    for requirement in &release.platform_requires {
-        println!(
-            "Platform requirement: {} {}",
-            requirement.name, requirement.constraint
-        );
-    }
 }

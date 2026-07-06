@@ -52,6 +52,20 @@ fn offline_install(project: &Path, metadata_dir: &Path) -> Output {
     offline_install_with_platform(project, metadata_dir, "8.2.25")
 }
 
+fn assert_install_summary(output: &Output, package_count: usize) {
+    let package_label = if package_count == 1 {
+        "1 package".to_string()
+    } else {
+        format!("{package_count} packages")
+    };
+
+    assert!(
+        stdout(output).contains(&format!("Install complete: {package_label} in ")),
+        "{}",
+        stdout(output)
+    );
+}
+
 fn offline_install_with_platform(project: &Path, metadata_dir: &Path, php_version: &str) -> Output {
     concerto_command()
         .arg("install")
@@ -90,6 +104,7 @@ fn offline_installs_direct_requirement() {
     assert!(project.join("vendor/autoload.php").exists());
     assert!(project.join("vendor/psr/log").exists());
     assert!(!project.join("vendor/monolog/monolog").exists());
+    assert_install_summary(&output, 1);
 
     let lockfile = read_lockfile(&project);
 
@@ -113,6 +128,9 @@ fn offline_installs_transitive_requirement_and_relinks_from_lockfile() {
     assert!(project.join("vendor/autoload.php").exists());
     assert!(project.join("vendor/monolog/monolog").exists());
     assert!(project.join("vendor/psr/log").exists());
+    assert_install_summary(&output, 2);
+    assert!(stdout(&output).contains("monolog/monolog 3.0.0 ->"));
+    assert!(!stdout(&output).contains("monolog/monolog ^3.0 ->"));
 
     let lockfile = read_lockfile(&project);
 
@@ -125,8 +143,35 @@ fn offline_installs_transitive_requirement_and_relinks_from_lockfile() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).contains("Installing from lockfile"));
+    assert_install_summary(&output, 2);
     assert!(project.join("vendor/monolog/monolog").exists());
     assert!(project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_prints_final_summary_after_cold_store_rebuild() {
+    let project = temp_project("offline-cold-summary");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_install_summary(&output, 2);
+    assert!(stdout(&output).contains("Generated autoload for 2 packages"));
+
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+    std::fs::remove_dir_all(project.join(".concerto")).unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_install_summary(&output, 2);
+    assert!(stdout(&output).contains("Generated autoload for 2 packages"));
 }
 
 #[test]

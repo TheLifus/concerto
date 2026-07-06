@@ -20,6 +20,9 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+skip = [
+    { crate = "hashbrown@0.16.1", reason = "Pulled by ratatui-core through kasuari; keep until upstream converges on hashbrown 0.17." },
+]
 
 [sources]
 unknown-registry = "deny"
