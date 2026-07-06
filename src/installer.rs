@@ -1,3 +1,4 @@
+use crate::autoload;
 use crate::lockfile::{self, LockedPackage, Lockfile};
 use std::path::Path;
 
@@ -26,7 +27,9 @@ pub fn install() -> Result<(), String> {
         std::fs::read_to_string("composer.json").map_err(|_| NO_COMPOSER_JSON.to_string())?;
 
     let packages = required_packages(&content)?;
+    let platform_started_at = Instant::now();
     let platform = platform::current()?;
+    perf.log("platform_current", platform_started_at.elapsed(), &[])?;
 
     if let Some(lockfile) = lockfile::read()? {
         if lockfile::matches_root_requirements(&lockfile, &packages) {
@@ -41,6 +44,7 @@ pub fn install() -> Result<(), String> {
                 install_locked_package(package, &perf)?;
             }
 
+            write_autoload(&lockfile, &content, &perf)?;
             perf.log(
                 "lockfile_install",
                 lockfile_started_at.elapsed(),
@@ -66,12 +70,28 @@ pub fn install() -> Result<(), String> {
     install_resolved_packages(&resolved_packages, &perf)?;
 
     let lockfile = build_lockfile(packages, resolved_packages);
+    write_autoload(&lockfile, &content, &perf)?;
     let lockfile_started_at = Instant::now();
     lockfile::write(&lockfile)?;
     perf.log("lockfile_write", lockfile_started_at.elapsed(), &[])?;
     perf.finish_run(install_started_at.elapsed(), package_count)?;
 
     Ok(())
+}
+
+fn write_autoload(
+    lockfile: &Lockfile,
+    root_composer_json: &str,
+    perf: &PerfLogger,
+) -> Result<(), String> {
+    let started_at = Instant::now();
+
+    autoload::write(lockfile, root_composer_json)?;
+    perf.log(
+        "autoload_write",
+        started_at.elapsed(),
+        &[("packages", lockfile.packages.len().to_string())],
+    )
 }
 
 fn validate_locked_platform_requirements(

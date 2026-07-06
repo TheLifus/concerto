@@ -7,6 +7,7 @@
 
 use std::env;
 
+mod autoload;
 mod composer;
 mod http;
 mod installer;
