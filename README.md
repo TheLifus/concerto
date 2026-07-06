@@ -52,10 +52,24 @@ The lockfile format is documented in [docs/lockfile.md](docs/lockfile.md).
 | Packagist metadata fetches | Composer scripts and plugins |
 | transitive package resolution | `require-dev` |
 | Composer-like version constraints | custom repositories |
-| local package store | platform enforcement |
+| local package store | extension version constraints |
 | `vendor/` symlinks | full Composer solver parity |
 | `concerto.lock` fast path | global content-addressable store |
+| basic platform enforcement | `lib-*` platform checks |
 | performance benchmark script | production security hardening |
+
+## Platform support
+
+Concerto validates platform requirements before installing resolved packages.
+
+Supported today:
+
+- `php`: checked against the local `php -r 'echo PHP_VERSION;'`
+- `ext-*`: presence checked against extensions listed by `php -m`
+- `lib-*`: detected but currently reported as unsupported
+
+If a requirement is not satisfied, install fails with the package name,
+requirement name, required constraint, and detected value.
 
 ## Install Flow
 
@@ -161,7 +175,7 @@ Production-grade next steps:
 
 - versioned lockfile format
 - root requirement hash in `concerto.lock`
-- platform requirements: `php`, `ext-*`, `lib-*`
+- full platform parity, including extension versions and real `lib-*` checks
 - Composer-compatible autoload generation
 - HTTP metadata cache
 - local Packagist fixtures for deterministic tests

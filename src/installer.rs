@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::composer::{RequiredPackage, required_packages};
 use crate::package_store::{self, PackageArchive};
 use crate::perf::PerfLogger;
+use crate::platform;
 use crate::resolver::{self, ResolvedPackageEntry, ResolvedPackages};
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ pub fn install() -> Result<(), String> {
         std::fs::read_to_string("composer.json").map_err(|_| NO_COMPOSER_JSON.to_string())?;
 
     let packages = required_packages(&content)?;
+    let platform = platform::current()?;
 
     if let Some(lockfile) = lockfile::read()? {
         if lockfile::matches_root_requirements(&lockfile, &packages) {
@@ -32,7 +34,7 @@ pub fn install() -> Result<(), String> {
                 "Installing from lockfile with {} packages",
                 lockfile.packages.len()
             );
-
+            validate_locked_platform_requirements(&lockfile.packages, &platform)?;
             let lockfile_started_at = Instant::now();
 
             for package in &lockfile.packages {
@@ -59,6 +61,7 @@ pub fn install() -> Result<(), String> {
         .map_err(|error| format!("Could not create vendor directory: {error}"))?;
 
     let resolved_packages = resolver::resolve(&packages, &perf)?;
+    validate_resolved_platform_requirements(&resolved_packages, &platform)?;
     let package_count = resolved_packages.len();
     install_resolved_packages(&resolved_packages, &perf)?;
 
@@ -71,6 +74,27 @@ pub fn install() -> Result<(), String> {
     Ok(())
 }
 
+fn validate_locked_platform_requirements(
+    packages: &[LockedPackage],
+    platform: &platform::Platform,
+) -> Result<(), String> {
+    for package in packages {
+        platform::validate(&package.platform_requires, platform, &package.name)?;
+    }
+
+    Ok(())
+}
+
+fn validate_resolved_platform_requirements(
+    packages: &ResolvedPackages,
+    platform: &platform::Platform,
+) -> Result<(), String> {
+    for (name, package) in packages {
+        platform::validate(&package.platform_requires, platform, name)?;
+    }
+
+    Ok(())
+}
 fn install_resolved_packages(
     resolved_packages: &ResolvedPackages,
     perf: &PerfLogger,
@@ -246,5 +270,72 @@ fn build_lockfile(
         root_requirements_hash: lockfile::root_requirements_hash(&root_requirements),
         root_requirements,
         packages,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::Platform;
+    use std::collections::HashMap;
+
+    #[test]
+    fn rejects_unmet_locked_platform_requirements() {
+        let packages = vec![LockedPackage {
+            name: "symfony/console".to_string(),
+            version: "8.0.0".to_string(),
+            dist_url: "https://example.com/symfony-console.zip".to_string(),
+            package_requires: Vec::new(),
+            platform_requires: vec![required_package("php", ">=8.4")],
+        }];
+        let platform = platform("8.3.0", &[]);
+
+        let error = validate_locked_platform_requirements(&packages, &platform).unwrap_err();
+
+        assert!(error.contains("symfony/console"));
+        assert!(error.contains("php"));
+        assert!(error.contains(">=8.4"));
+        assert!(error.contains("8.3.0"));
+    }
+
+    #[test]
+    fn rejects_unmet_resolved_platform_requirements() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "symfony/console".to_string(),
+            ResolvedPackageEntry {
+                version: "8.0.0".to_string(),
+                dist_url: "https://example.com/symfony-console.zip".to_string(),
+                metadata_url: "https://repo.packagist.org/p2/symfony/console.json".to_string(),
+                constraints: vec!["^8.0".to_string()],
+                package_requires: Vec::new(),
+                platform_requires: vec![required_package("ext-intl", "*")],
+            },
+        );
+        let platform = platform("8.3.0", &["json"]);
+
+        let error = validate_resolved_platform_requirements(&packages, &platform).unwrap_err();
+
+        assert!(error.contains("symfony/console"));
+        assert!(error.contains("ext-intl"));
+        assert!(error.contains("*"));
+        assert!(error.contains("missing"));
+    }
+
+    fn required_package(name: &str, constraint: &str) -> RequiredPackage {
+        RequiredPackage {
+            name: name.to_string(),
+            constraint: constraint.to_string(),
+        }
+    }
+
+    fn platform(php_version: &str, extensions: &[&str]) -> Platform {
+        Platform {
+            php_version: php_version.to_string(),
+            extensions: extensions
+                .iter()
+                .map(|extension| extension.to_string())
+                .collect(),
+        }
     }
 }
