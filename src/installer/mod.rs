@@ -20,6 +20,14 @@ struct PreparedPackage {
     source_event: &'static str,
 }
 
+struct PreparedLockedPackage {
+    name: String,
+    version: String,
+    source: package_store::PackageSource,
+    source_duration: Duration,
+    source_event: &'static str,
+}
+
 pub fn install() -> Result<(), String> {
     let perf = PerfLogger::from_env()?;
     let install_started_at = Instant::now();
@@ -40,9 +48,7 @@ pub fn install() -> Result<(), String> {
             validate_locked_platform_requirements(&lockfile.packages, &platform)?;
             let lockfile_started_at = Instant::now();
 
-            for package in &lockfile.packages {
-                install_locked_package(package, &perf)?;
-            }
+            install_locked_packages(&lockfile.packages, &perf)?;
 
             write_autoload(&lockfile, &content, &perf)?;
             perf.log(
@@ -159,6 +165,24 @@ fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Resu
     Ok(())
 }
 
+fn prepare_package_source(
+    name: &str,
+    version: &str,
+    dist_url: &str,
+) -> Result<(package_store::PackageSource, Duration, &'static str), String> {
+    let archive = PackageArchive { version, dist_url };
+    let started_at = Instant::now();
+    let source = package_store::prepare_source(name, archive)?;
+    let source_event = if source.is_reused() {
+        println!("Reusing {}", source.path().display());
+        "source_reuse"
+    } else {
+        "source_download_extract"
+    };
+
+    Ok((source, started_at.elapsed(), source_event))
+}
+
 fn prepare_resolved_sources(
     resolved_packages: &ResolvedPackages,
 ) -> Result<Vec<PreparedPackage>, String> {
@@ -189,52 +213,83 @@ fn prepare_resolved_source(
     name: &str,
     package: &ResolvedPackageEntry,
 ) -> Result<PreparedPackage, String> {
-    let archive = PackageArchive {
-        version: &package.version,
-        dist_url: &package.dist_url,
-    };
-    let started_at = Instant::now();
-    let source = package_store::prepare_source(name, archive)?;
-    let source_event = if source.is_reused() {
-        println!("Reusing {}", source.path().display());
-        "source_reuse"
-    } else {
-        "source_download_extract"
-    };
+    let (source, source_duration, source_event) =
+        prepare_package_source(name, &package.version, &package.dist_url)?;
 
     Ok(PreparedPackage {
         name: name.to_string(),
         constraint: package.constraints.join(", "),
         metadata_url: package.metadata_url.clone(),
         source,
-        source_duration: started_at.elapsed(),
+        source_duration,
         source_event,
     })
 }
 
-fn install_locked_package(package: &LockedPackage, perf: &PerfLogger) -> Result<(), String> {
-    let archive = PackageArchive {
-        version: &package.version,
-        dist_url: &package.dist_url,
-    };
-
-    let source_started_at = Instant::now();
-    let source = package_store::prepare_source(&package.name, archive)?;
-    let source_event = if source.is_reused() {
-        println!("Reusing {}", source.path().display());
-        "source_reuse"
-    } else {
-        "source_download_extract"
-    };
+fn install_locked_packages(packages: &[LockedPackage], perf: &PerfLogger) -> Result<(), String> {
+    let prepare_started_at = Instant::now();
+    let prepared_packages = prepare_locked_sources(packages)?;
 
     perf.log(
+        "lockfile_sources_prepare",
+        prepare_started_at.elapsed(),
+        &[("packages", prepared_packages.len().to_string())],
+    )?;
+
+    for package in prepared_packages {
+        install_prepared_locked_package(package, perf)?;
+    }
+
+    Ok(())
+}
+
+fn prepare_locked_sources(
+    packages: &[LockedPackage],
+) -> Result<Vec<PreparedLockedPackage>, String> {
+    std::thread::scope(|scope| {
+        let handles = packages
+            .iter()
+            .map(|package| scope.spawn(move || prepare_locked_source(package)))
+            .collect::<Vec<_>>();
+
+        let mut prepared = Vec::with_capacity(handles.len());
+
+        for handle in handles {
+            let package = handle
+                .join()
+                .map_err(|_| "Package source worker panicked".to_string())??;
+            prepared.push(package);
+        }
+
+        Ok(prepared)
+    })
+}
+
+fn prepare_locked_source(package: &LockedPackage) -> Result<PreparedLockedPackage, String> {
+    let (source, source_duration, source_event) =
+        prepare_package_source(&package.name, &package.version, &package.dist_url)?;
+
+    Ok(PreparedLockedPackage {
+        name: package.name.clone(),
+        version: package.version.clone(),
+        source,
+        source_duration,
         source_event,
-        source_started_at.elapsed(),
+    })
+}
+
+fn install_prepared_locked_package(
+    package: PreparedLockedPackage,
+    perf: &PerfLogger,
+) -> Result<(), String> {
+    perf.log(
+        package.source_event,
+        package.source_duration,
         &[("package", package.name.clone())],
     )?;
 
     let link_started_at = Instant::now();
-    package_store::link_to_vendor(&source)?;
+    package_store::link_to_vendor(&package.source)?;
     perf.log(
         "vendor_link",
         link_started_at.elapsed(),
@@ -245,7 +300,7 @@ fn install_locked_package(package: &LockedPackage, perf: &PerfLogger) -> Result<
         "{} {} -> {}",
         package.name,
         package.version,
-        source.path().display()
+        package.source.path().display()
     );
 
     Ok(())

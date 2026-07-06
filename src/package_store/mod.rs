@@ -34,6 +34,13 @@ pub(crate) fn prepare_source(
     package_name: &str,
     archive: PackageArchive<'_>,
 ) -> Result<PackageSource, String> {
+    prepare_source_inner(package_name, archive).map_err(|error| format!("{package_name}: {error}"))
+}
+
+fn prepare_source_inner(
+    package_name: &str,
+    archive: PackageArchive<'_>,
+) -> Result<PackageSource, String> {
     let paths = package_paths(package_name, archive.version)?;
 
     let (path, reused) = match existing_source(&paths)? {
@@ -106,7 +113,12 @@ fn download_and_publish_source(
     archive: PackageArchive<'_>,
     paths: &PackagePaths,
 ) -> Result<PathBuf, String> {
-    let zip = download_bytes(archive.dist_url)?;
+    let zip = download_bytes(archive.dist_url).map_err(|error| {
+        format!(
+            "Could not download package archive from {}: {error}",
+            archive.dist_url
+        )
+    })?;
 
     std::fs::write(&paths.zip, zip)
         .map_err(|error| format!("Could not write package zip: {error}"))?;
