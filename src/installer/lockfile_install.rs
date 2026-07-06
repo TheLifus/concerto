@@ -1,4 +1,5 @@
 use super::{PackageSourcePreparation, prepare_package_source};
+use crate::error::{ConcertoError, Result};
 use crate::lockfile::LockedPackage;
 use crate::package_store;
 use crate::perf::PerfLogger;
@@ -12,7 +13,7 @@ struct PreparedLockedPackage {
     source_event: &'static str,
 }
 
-pub(super) fn install(packages: &[LockedPackage], perf: &PerfLogger) -> Result<(), String> {
+pub(super) fn install(packages: &[LockedPackage], perf: &PerfLogger) -> Result<()> {
     let prepare_started_at = Instant::now();
     let prepared_packages = prepare_sources(packages)?;
 
@@ -29,7 +30,7 @@ pub(super) fn install(packages: &[LockedPackage], perf: &PerfLogger) -> Result<(
     Ok(())
 }
 
-fn prepare_sources(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPackage>, String> {
+fn prepare_sources(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPackage>> {
     std::thread::scope(|scope| {
         let handles = packages
             .iter()
@@ -41,7 +42,7 @@ fn prepare_sources(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPacka
         for handle in handles {
             let package = handle
                 .join()
-                .map_err(|_| "Package source worker panicked".to_string())??;
+                .map_err(|_| ConcertoError::internal("Package source worker panicked"))??;
             prepared.push(package);
         }
 
@@ -49,7 +50,7 @@ fn prepare_sources(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPacka
     })
 }
 
-fn prepare_source(package: &LockedPackage) -> Result<PreparedLockedPackage, String> {
+fn prepare_source(package: &LockedPackage) -> Result<PreparedLockedPackage> {
     let PackageSourcePreparation {
         source,
         duration,
@@ -65,10 +66,7 @@ fn prepare_source(package: &LockedPackage) -> Result<PreparedLockedPackage, Stri
     })
 }
 
-fn install_prepared_package(
-    package: PreparedLockedPackage,
-    perf: &PerfLogger,
-) -> Result<(), String> {
+fn install_prepared_package(package: PreparedLockedPackage, perf: &PerfLogger) -> Result<()> {
     perf.log(
         package.source_event,
         package.source_duration,

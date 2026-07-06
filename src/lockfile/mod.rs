@@ -1,4 +1,5 @@
 use crate::composer::RequiredPackage;
+use crate::error::{ConcertoError, Result};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub(crate) struct Lockfile {
@@ -20,35 +21,40 @@ pub(crate) struct LockedPackage {
 pub(crate) const LOCKFILE_VERSION: u8 = 1;
 pub(crate) const LOCKFILE_PATH: &str = "concerto.lock";
 
-pub(crate) fn write(lockfile: &Lockfile) -> Result<(), String> {
-    let content = serde_json::to_string_pretty(lockfile)
-        .map_err(|error| format!("Could not serialize lockfile: {error}"))?;
+pub(crate) fn write(lockfile: &Lockfile) -> Result<()> {
+    let content = serde_json::to_string_pretty(lockfile).map_err(|error| {
+        ConcertoError::lockfile(format!("Could not serialize lockfile: {error}"))
+    })?;
 
     std::fs::write(LOCKFILE_PATH, content)
-        .map_err(|error| format!("Could not write lockfile: {error}"))
+        .map_err(|error| ConcertoError::lockfile(format!("Could not write lockfile: {error}")))
 }
 
-pub(crate) fn read() -> Result<Option<Lockfile>, String> {
+pub(crate) fn read() -> Result<Option<Lockfile>> {
     match std::fs::read_to_string(LOCKFILE_PATH) {
         Ok(content) => parse(&content).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("Could not read lockfile: {error}")),
+        Err(error) => Err(ConcertoError::lockfile(format!(
+            "Could not read lockfile: {error}"
+        ))),
     }
 }
 
-fn parse(content: &str) -> Result<Lockfile, String> {
-    let lockfile: Lockfile =
-        serde_json::from_str(content).map_err(|error| format!("Invalid lockfile: {error}"))?;
+fn parse(content: &str) -> Result<Lockfile> {
+    let lockfile: Lockfile = serde_json::from_str(content)
+        .map_err(|error| ConcertoError::lockfile(format!("Invalid lockfile: {error}")))?;
 
     if lockfile.lockfile_version != LOCKFILE_VERSION {
-        return Err(format!(
+        return Err(ConcertoError::lockfile(format!(
             "Unsupported lockfile version: {}",
             lockfile.lockfile_version
-        ));
+        )));
     }
 
     if lockfile.root_requirements_hash != root_requirements_hash(&lockfile.root_requirements) {
-        return Err("Lockfile root requirements hash does not match requirements".to_string());
+        return Err(ConcertoError::lockfile(
+            "Lockfile root requirements hash does not match requirements",
+        ));
     }
 
     Ok(lockfile)

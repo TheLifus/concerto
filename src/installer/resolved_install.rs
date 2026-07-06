@@ -1,4 +1,5 @@
 use super::{PackageSourcePreparation, prepare_package_source, print_install_summary};
+use crate::error::{ConcertoError, Result};
 use crate::package_store;
 use crate::perf::PerfLogger;
 use crate::resolver::{ResolvedPackageEntry, ResolvedPackages};
@@ -13,10 +14,7 @@ struct PreparedPackage {
     source_event: &'static str,
 }
 
-pub(super) fn install(
-    resolved_packages: &ResolvedPackages,
-    perf: &PerfLogger,
-) -> Result<(), String> {
+pub(super) fn install(resolved_packages: &ResolvedPackages, perf: &PerfLogger) -> Result<()> {
     let prepare_started_at = Instant::now();
     let prepared_packages = prepare_sources(resolved_packages)?;
 
@@ -33,7 +31,7 @@ pub(super) fn install(
     Ok(())
 }
 
-fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Result<(), String> {
+fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Result<()> {
     perf.log(
         package.source_event,
         package.source_duration,
@@ -57,7 +55,7 @@ fn install_prepared_package(package: PreparedPackage, perf: &PerfLogger) -> Resu
     Ok(())
 }
 
-fn prepare_sources(resolved_packages: &ResolvedPackages) -> Result<Vec<PreparedPackage>, String> {
+fn prepare_sources(resolved_packages: &ResolvedPackages) -> Result<Vec<PreparedPackage>> {
     let mut packages = resolved_packages.iter().collect::<Vec<_>>();
 
     packages.sort_by(|left, right| left.0.cmp(right.0));
@@ -73,7 +71,7 @@ fn prepare_sources(resolved_packages: &ResolvedPackages) -> Result<Vec<PreparedP
         for handle in handles {
             let package = handle
                 .join()
-                .map_err(|_| "Package source worker panicked".to_string())??;
+                .map_err(|_| ConcertoError::internal("Package source worker panicked"))??;
             prepared.push(package);
         }
 
@@ -81,7 +79,7 @@ fn prepare_sources(resolved_packages: &ResolvedPackages) -> Result<Vec<PreparedP
     })
 }
 
-fn prepare_source(name: &str, package: &ResolvedPackageEntry) -> Result<PreparedPackage, String> {
+fn prepare_source(name: &str, package: &ResolvedPackageEntry) -> Result<PreparedPackage> {
     let PackageSourcePreparation {
         source,
         duration,

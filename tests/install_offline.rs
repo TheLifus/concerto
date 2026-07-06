@@ -158,6 +158,26 @@ fn offline_relinks_from_lockfile_without_archive_url() {
 }
 
 #[test]
+fn offline_rejects_existing_vendor_directory() {
+    let project = temp_project("offline-existing-vendor-directory");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("vendor/psr/log")).unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Could not link psr/log"));
+    assert!(error.contains("vendor path already exists and is not a symlink"));
+    assert!(error.contains("Remove or move the existing vendor path"));
+}
+
+#[test]
 fn offline_reports_missing_lockfile_source() {
     let project = temp_project("offline-lockfile-missing-source");
     let metadata_dir = prepare_packagist_fixtures(&project);

@@ -14,7 +14,9 @@ fn rejects_unmet_locked_platform_requirements() {
     }];
     let platform = platform("8.3.0", &[]);
 
-    let error = validate_locked_platform_requirements(&packages, &platform).unwrap_err();
+    let error = validate_locked_platform_requirements(&packages, &platform)
+        .unwrap_err()
+        .to_string();
 
     assert!(error.contains("symfony/console"));
     assert!(error.contains("php"));
@@ -38,7 +40,9 @@ fn rejects_unmet_resolved_platform_requirements() {
     );
     let platform = platform("8.3.0", &["json"]);
 
-    let error = validate_resolved_platform_requirements(&packages, &platform).unwrap_err();
+    let error = validate_resolved_platform_requirements(&packages, &platform)
+        .unwrap_err()
+        .to_string();
 
     assert!(error.contains("symfony/console"));
     assert!(error.contains("ext-intl"));

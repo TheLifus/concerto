@@ -1,4 +1,5 @@
 use crate::composer::package_path_parts;
+use crate::error::{ConcertoError, Result};
 use crate::lockfile::{LockedPackage, Lockfile};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,19 +16,21 @@ struct AutoloadMap {
     files: Vec<String>,
 }
 
-pub(crate) fn write(lockfile: &Lockfile, root_composer_json: &str) -> Result<(), String> {
+pub(crate) fn write(lockfile: &Lockfile, root_composer_json: &str) -> Result<()> {
     let autoload = read_autoload_map(lockfile, root_composer_json)?;
 
-    std::fs::write(LOADER_PATH, loader_file(&autoload)?)
-        .map_err(|error| format!("Could not write autoload map: {error}"))?;
+    std::fs::write(LOADER_PATH, loader_file(&autoload)?).map_err(|error| {
+        ConcertoError::autoload(format!("Could not write autoload map: {error}"))
+    })?;
 
-    std::fs::write(AUTOLOAD_PATH, autoload_file())
-        .map_err(|error| format!("Could not write autoload file: {error}"))?;
+    std::fs::write(AUTOLOAD_PATH, autoload_file()).map_err(|error| {
+        ConcertoError::autoload(format!("Could not write autoload file: {error}"))
+    })?;
 
     Ok(())
 }
 
-fn read_autoload_map(lockfile: &Lockfile, root_composer_json: &str) -> Result<AutoloadMap, String> {
+fn read_autoload_map(lockfile: &Lockfile, root_composer_json: &str) -> Result<AutoloadMap> {
     let mut autoload = AutoloadMap::default();
 
     for package in package_file_order(lockfile) {
@@ -82,7 +85,7 @@ fn visit_package<'a>(
     ordered.push(package);
 }
 
-fn collect_package_autoload(autoload: &mut AutoloadMap, package_path: &Path) -> Result<(), String> {
+fn collect_package_autoload(autoload: &mut AutoloadMap, package_path: &Path) -> Result<()> {
     let composer_json = package_path.join("composer.json");
 
     if !composer_json.exists() {
@@ -93,12 +96,9 @@ fn collect_package_autoload(autoload: &mut AutoloadMap, package_path: &Path) -> 
     collect_autoload_sections(autoload, &parsed, package_path)
 }
 
-fn collect_root_autoload(
-    autoload: &mut AutoloadMap,
-    root_composer_json: &str,
-) -> Result<(), String> {
+fn collect_root_autoload(autoload: &mut AutoloadMap, root_composer_json: &str) -> Result<()> {
     let parsed: Value = serde_json::from_str(root_composer_json)
-        .map_err(|error| format!("Invalid composer.json: {error}"))?;
+        .map_err(|error| ConcertoError::autoload(format!("Invalid composer.json: {error}")))?;
 
     collect_autoload_sections(autoload, &parsed, Path::new("."))
 }
@@ -107,7 +107,7 @@ fn collect_autoload_sections(
     autoload: &mut AutoloadMap,
     composer_json: &Value,
     package_path: &Path,
-) -> Result<(), String> {
+) -> Result<()> {
     let Some(autoload_json) = composer_json.get("autoload") else {
         return Ok(());
     };
@@ -123,7 +123,7 @@ fn collect_namespace_map(
     section: &str,
     package_path: &Path,
     mappings: &mut BTreeMap<String, Vec<String>>,
-) -> Result<(), String> {
+) -> Result<()> {
     let Some(map) = autoload_json
         .get(section)
         .and_then(|section| section.as_object())
@@ -147,7 +147,7 @@ fn collect_files(
     autoload_json: &Value,
     package_path: &Path,
     files: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<()> {
     let Some(values) = autoload_json.get("files") else {
         return Ok(());
     };
@@ -163,15 +163,16 @@ fn collect_classmap(
     autoload_json: &Value,
     package_path: &Path,
     classmap: &mut BTreeMap<String, String>,
-) -> Result<(), String> {
+) -> Result<()> {
     let Some(values) = autoload_json.get("classmap") else {
         return Ok(());
     };
 
     for path in autoload_paths(values, "classmap")? {
         for file in php_files(package_path.join(path))? {
-            let content = std::fs::read_to_string(&file)
-                .map_err(|error| format!("Could not read classmap file: {error}"))?;
+            let content = std::fs::read_to_string(&file).map_err(|error| {
+                ConcertoError::autoload(format!("Could not read classmap file: {error}"))
+            })?;
 
             let file = absolute_path(file)?;
 
@@ -184,23 +185,28 @@ fn collect_classmap(
     Ok(())
 }
 
-fn autoload_paths<'a>(value: &'a Value, section: &str) -> Result<Vec<&'a str>, String> {
+fn autoload_paths<'a>(value: &'a Value, section: &str) -> Result<Vec<&'a str>> {
     if let Some(path) = value.as_str() {
         return Ok(vec![path]);
     }
 
     value
         .as_array()
-        .ok_or_else(|| format!("autoload.{section} must be a string or an array of strings"))?
+        .ok_or_else(|| {
+            ConcertoError::autoload(format!(
+                "autoload.{section} must be a string or an array of strings"
+            ))
+        })?
         .iter()
         .map(|path| {
-            path.as_str()
-                .ok_or_else(|| format!("autoload.{section} path must be a string"))
+            path.as_str().ok_or_else(|| {
+                ConcertoError::autoload(format!("autoload.{section} path must be a string"))
+            })
         })
         .collect()
 }
 
-fn php_files(path: PathBuf) -> Result<Vec<PathBuf>, String> {
+fn php_files(path: PathBuf) -> Result<Vec<PathBuf>> {
     if path.is_file() {
         return Ok(
             if path.extension().is_some_and(|extension| extension == "php") {
@@ -223,11 +229,13 @@ fn php_files(path: PathBuf) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn collect_php_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
-    for entry in std::fs::read_dir(path)
-        .map_err(|error| format!("Could not read classmap directory: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("Could not read classmap entry: {error}"))?;
+fn collect_php_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(path).map_err(|error| {
+        ConcertoError::autoload(format!("Could not read classmap directory: {error}"))
+    })? {
+        let entry = entry.map_err(|error| {
+            ConcertoError::autoload(format!("Could not read classmap entry: {error}"))
+        })?;
         let path = entry.path();
 
         if path.is_dir() {
@@ -299,17 +307,19 @@ fn qualified_class_name(namespace: Option<&str>, class: &str) -> String {
     }
 }
 
-fn vendor_package_path(package_name: &str) -> Result<PathBuf, String> {
+fn vendor_package_path(package_name: &str) -> Result<PathBuf> {
     let (vendor, package) = package_path_parts(package_name)?;
 
     Ok(PathBuf::from("vendor").join(vendor).join(package))
 }
 
-fn read_json_file(path: &Path) -> Result<Value, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+fn read_json_file(path: &Path) -> Result<Value> {
+    let content = std::fs::read_to_string(path).map_err(|error| {
+        ConcertoError::autoload(format!("Could not read {}: {error}", path.display()))
+    })?;
 
-    serde_json::from_str(&content).map_err(|error| format!("Invalid {}: {error}", path.display()))
+    serde_json::from_str(&content)
+        .map_err(|error| ConcertoError::autoload(format!("Invalid {}: {error}", path.display())))
 }
 
 fn autoload_file() -> String {
@@ -324,10 +334,11 @@ return $loader;
     .to_string()
 }
 
-fn loader_file(autoload: &AutoloadMap) -> Result<String, String> {
+fn loader_file(autoload: &AutoloadMap) -> Result<String> {
     let data = AutoloadData::from(autoload);
-    let data_json = serde_json::to_string(&data)
-        .map_err(|error| format!("Could not serialize autoload data: {error}"))?;
+    let data_json = serde_json::to_string(&data).map_err(|error| {
+        ConcertoError::autoload(format!("Could not serialize autoload data: {error}"))
+    })?;
 
     Ok(format!(
         r#"<?php
@@ -343,17 +354,18 @@ return function (string $class) use ($autoload): void {{
     ))
 }
 
-fn autoload_path(package_path: &Path, path: &str) -> Result<String, String> {
+fn autoload_path(package_path: &Path, path: &str) -> Result<String> {
     absolute_path(package_path.join(path))
 }
 
-fn absolute_path(path: PathBuf) -> Result<String, String> {
+fn absolute_path(path: PathBuf) -> Result<String> {
     if path.is_absolute() {
         return Ok(display_path(&path));
     }
 
-    let current_dir = std::env::current_dir()
-        .map_err(|error| format!("Could not read current directory: {error}"))?;
+    let current_dir = std::env::current_dir().map_err(|error| {
+        ConcertoError::autoload(format!("Could not read current directory: {error}"))
+    })?;
 
     Ok(display_path(&current_dir.join(path)))
 }

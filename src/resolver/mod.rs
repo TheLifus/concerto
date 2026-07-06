@@ -1,4 +1,5 @@
 use crate::composer::RequiredPackage;
+use crate::error::{ConcertoError, Result};
 use crate::http::get_text;
 use crate::packagist::{self, PackagistRelease};
 use crate::perf::PerfLogger;
@@ -39,7 +40,7 @@ pub(crate) fn resolve(
     root_packages: &[RequiredPackage],
     platform: &Platform,
     perf: &PerfLogger,
-) -> Result<ResolvedPackages, String> {
+) -> Result<ResolvedPackages> {
     let mut package_constraints = PackageConstraints::new();
 
     for package in root_packages {
@@ -85,7 +86,7 @@ fn take_resolve_requests(
     pending: &mut Vec<String>,
     package_constraints: &PackageConstraints,
     resolved_packages: &ResolvedPackages,
-) -> Result<Vec<PackageResolveRequest>, String> {
+) -> Result<Vec<PackageResolveRequest>> {
     pending.sort();
     pending.dedup();
 
@@ -93,9 +94,13 @@ fn take_resolve_requests(
     let mut requests = Vec::new();
 
     for name in package_names {
-        let constraints = package_constraints
-            .get(&name)
-            .ok_or_else(|| format!("Missing constraints for {name}"))?;
+        let constraints = package_constraints.get(&name).ok_or_else(|| {
+            ConcertoError::resolution(
+                &name,
+                &[],
+                "missing constraints while resolving dependency graph",
+            )
+        })?;
 
         if let Some(resolved_package) = resolved_packages.get(&name) {
             ensure_resolved_package_matches(&name, constraints, resolved_package)?;
@@ -113,7 +118,7 @@ fn take_resolve_requests(
 fn resolve_package_batch(
     requests: Vec<PackageResolveRequest>,
     platform: &Platform,
-) -> Result<Vec<ResolvedPackage>, String> {
+) -> Result<Vec<ResolvedPackage>> {
     std::thread::scope(|scope| {
         let handles = requests
             .into_iter()
@@ -125,7 +130,7 @@ fn resolve_package_batch(
         for handle in handles {
             let package = handle
                 .join()
-                .map_err(|_| "Package resolver worker panicked".to_string())??;
+                .map_err(|_| ConcertoError::internal("Package resolver worker panicked"))??;
             resolved.push(package);
         }
 
@@ -133,12 +138,9 @@ fn resolve_package_batch(
     })
 }
 
-fn resolve_package(
-    request: PackageResolveRequest,
-    platform: &Platform,
-) -> Result<ResolvedPackage, String> {
+fn resolve_package(request: PackageResolveRequest, platform: &Platform) -> Result<ResolvedPackage> {
     let started_at = Instant::now();
-    let (metadata_url, metadata) = package_metadata(&request.name)?;
+    let (metadata_url, metadata) = package_metadata(&request.name, &request.constraints)?;
 
     let release = packagist::first_release_candidate(
         &metadata,
@@ -157,15 +159,18 @@ fn resolve_package(
     })
 }
 
-fn package_metadata(package_name: &str) -> Result<(String, String), String> {
+fn package_metadata(package_name: &str, constraints: &[String]) -> Result<(String, String)> {
     if let Ok(fixtures_dir) = std::env::var(PACKAGIST_FIXTURES_DIR_ENV) {
         let path = fixture_metadata_path(Path::new(&fixtures_dir), package_name);
         let content = std::fs::read_to_string(&path).map_err(|error| {
-            format!(
-                "Could not read Packagist fixture for {} at {}: {}",
+            ConcertoError::resolution(
                 package_name,
-                path.display(),
-                error
+                constraints,
+                format!(
+                    "could not read Packagist fixture at {}: {}",
+                    path.display(),
+                    error
+                ),
             )
         })?;
 
@@ -173,7 +178,13 @@ fn package_metadata(package_name: &str) -> Result<(String, String), String> {
     }
 
     let metadata_url = packagist::package_url(package_name)?;
-    let metadata = get_text(&metadata_url)?;
+    let metadata = get_text(&metadata_url).map_err(|error| {
+        ConcertoError::resolution(
+            package_name,
+            constraints,
+            format!("could not fetch Packagist metadata from {metadata_url}: {error}"),
+        )
+    })?;
 
     Ok((metadata_url, metadata))
 }
@@ -188,7 +199,7 @@ fn insert_resolved_package(
     resolved_packages: &mut ResolvedPackages,
     pending: &mut Vec<String>,
     perf: &PerfLogger,
-) -> Result<(), String> {
+) -> Result<()> {
     println!("Fetched {} bytes", resolved.metadata_size);
     perf.log(
         "resolve_package",
@@ -227,13 +238,19 @@ fn ensure_resolved_package_matches(
     package_name: &str,
     constraints: &[String],
     resolved_package: &ResolvedPackageEntry,
-) -> Result<(), String> {
+) -> Result<()> {
     let mut satisfies = true;
 
     for constraint in constraints {
         let constraint_matches =
             semver_php::Semver::satisfies(&resolved_package.version, constraint).map_err(
-                |error| format!("Could not check installed package constraint: {error}"),
+                |error| {
+                    ConcertoError::resolution(
+                        package_name,
+                        constraints,
+                        format!("could not check installed package constraint: {error}"),
+                    )
+                },
             )?;
         satisfies = satisfies && constraint_matches;
     }
@@ -247,12 +264,15 @@ fn ensure_resolved_package_matches(
         return Ok(());
     }
 
-    Err(format!(
-        "Version conflict for {}: resolved {} from {}, but requested {}",
+    Err(ConcertoError::resolution(
         package_name,
-        resolved_package.version,
-        resolved_package.constraints.join(", "),
-        constraints.join(", ")
+        constraints,
+        format!(
+            "version conflict: resolved {} from {}, but requested {}",
+            resolved_package.version,
+            resolved_package.constraints.join(", "),
+            constraints.join(", ")
+        ),
     ))
 }
 

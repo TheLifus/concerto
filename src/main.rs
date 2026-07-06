@@ -9,6 +9,7 @@ use std::env;
 
 mod autoload;
 mod composer;
+mod error;
 mod http;
 mod installer;
 mod lockfile;

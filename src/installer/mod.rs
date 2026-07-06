@@ -2,6 +2,7 @@ mod lockfile_install;
 mod resolved_install;
 
 use crate::autoload;
+use crate::error::{ConcertoError, Result, StoreStep};
 use crate::lockfile::{self, LockedPackage, Lockfile};
 use std::path::Path;
 
@@ -10,9 +11,8 @@ use crate::package_store::{self, PackageArchive};
 use crate::perf::PerfLogger;
 use crate::platform;
 use crate::resolver::{self, ResolvedPackages};
+use std::io::ErrorKind;
 use std::time::{Duration, Instant};
-
-pub(crate) const NO_COMPOSER_JSON: &str = "No composer.json found";
 
 pub(super) struct PackageSourcePreparation {
     source: package_store::PackageSource,
@@ -20,11 +20,16 @@ pub(super) struct PackageSourcePreparation {
     event: &'static str,
 }
 
-pub fn install() -> Result<(), String> {
+pub fn install() -> Result<()> {
     let perf = PerfLogger::from_env()?;
     let install_started_at = Instant::now();
-    let content =
-        std::fs::read_to_string("composer.json").map_err(|_| NO_COMPOSER_JSON.to_string())?;
+    let content = std::fs::read_to_string("composer.json").map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            ConcertoError::MissingComposerJson
+        } else {
+            ConcertoError::composer_json(format!("Could not read composer.json: {error}"))
+        }
+    })?;
 
     let packages = required_packages(&content)?;
     let platform_started_at = Instant::now();
@@ -56,11 +61,21 @@ pub fn install() -> Result<(), String> {
         println!("Ignoring outdated lockfile");
     }
 
-    std::fs::create_dir_all(".concerto/store")
-        .map_err(|error| format!("Could not create local store: {error}"))?;
+    std::fs::create_dir_all(".concerto/store").map_err(|error| {
+        ConcertoError::store(
+            "root",
+            StoreStep::Prepare,
+            format!("could not create local store: {error}"),
+        )
+    })?;
 
-    std::fs::create_dir_all("vendor")
-        .map_err(|error| format!("Could not create vendor directory: {error}"))?;
+    std::fs::create_dir_all("vendor").map_err(|error| {
+        ConcertoError::store(
+            "root",
+            StoreStep::Prepare,
+            format!("could not create vendor directory: {error}"),
+        )
+    })?;
 
     let resolved_packages = resolver::resolve(&packages, &platform, &perf)?;
     validate_resolved_platform_requirements(&resolved_packages, &platform)?;
@@ -77,11 +92,7 @@ pub fn install() -> Result<(), String> {
     Ok(())
 }
 
-fn write_autoload(
-    lockfile: &Lockfile,
-    root_composer_json: &str,
-    perf: &PerfLogger,
-) -> Result<(), String> {
+fn write_autoload(lockfile: &Lockfile, root_composer_json: &str, perf: &PerfLogger) -> Result<()> {
     let started_at = Instant::now();
 
     autoload::write(lockfile, root_composer_json)?;
@@ -95,7 +106,7 @@ fn write_autoload(
 fn validate_locked_platform_requirements(
     packages: &[LockedPackage],
     platform: &platform::Platform,
-) -> Result<(), String> {
+) -> Result<()> {
     for package in packages {
         platform::validate(&package.platform_requires, platform, &package.name)?;
     }
@@ -106,7 +117,7 @@ fn validate_locked_platform_requirements(
 fn validate_resolved_platform_requirements(
     packages: &ResolvedPackages,
     platform: &platform::Platform,
-) -> Result<(), String> {
+) -> Result<()> {
     for (name, package) in packages {
         platform::validate(&package.platform_requires, platform, name)?;
     }
@@ -117,7 +128,7 @@ fn prepare_package_source(
     name: &str,
     version: &str,
     dist_url: &str,
-) -> Result<PackageSourcePreparation, String> {
+) -> Result<PackageSourcePreparation> {
     let archive = PackageArchive { version, dist_url };
     let started_at = Instant::now();
     let source = package_store::prepare_source(name, archive)?;
