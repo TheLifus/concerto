@@ -46,10 +46,10 @@ Example `composer.json`:
 Concerto writes:
 
 ```text
-.concerto/store/      reusable package sources keyed by package, version, and archive integrity
-vendor/               symlinks to stored package sources
+.concerto/store/      reusable, integrity-checked package sources
+vendor/               symlinks to stored package sources, rolled back on failed installs
 vendor/autoload.php   generated autoload entrypoint
-concerto.lock         resolved package graph
+concerto.lock         resolved package graph with archive integrity metadata
 ```
 
 ## Current status
@@ -63,12 +63,12 @@ minimal Composer-style autoloader.
 | Package input | `composer.json` `require`, root platform requirements, `require-dev` by default, `suggest` no-op |
 | Registry | `type: composer` repositories using P2 metadata and provider metadata, then Packagist fallback |
 | Resolution | PubGrub-backed Composer-like constraints, transitive dependencies, `conflict`, `provide`, `replace`, virtual provider discovery, platform-aware selection |
-| Store | local `.concerto/store` with source reuse |
-| Install | `vendor/` symlinks, lockfile fast path |
+| Store | local `.concerto/store` with source reuse, BLAKE3 archive integrity, and Packagist `dist.shasum` verification when provided |
+| Install | `vendor/` symlinks with rollback on failure, lockfile fast path, temporary lockfile/autoload writes |
 | Platform | `php`, installed `ext-*` with version constraints when PHP reports a version; `lib-*` is reported as unsupported |
 | Autoload | `psr-4`, `psr-0`, `files`, `classmap` |
 | CLI | `install`, `--help`, `--version` |
-| Tests | unit tests, CLI tests, offline install fixtures, ignored E2E benchmarks |
+| Tests | unit tests, CLI tests, offline install fixtures, CI coverage badge, ignored E2E benchmarks |
 
 Still out of scope for now:
 
@@ -87,8 +87,8 @@ flowchart TD
     lock -- yes --> locked["validate locked packages"]
     locked --> relink["reuse store and relink vendor"]
     lock -- no --> resolve["resolve package graph"]
-    resolve --> prepare["download or reuse archives"]
-    prepare --> write["write vendor, autoload and concerto.lock"]
+    resolve --> prepare["download, verify or reuse archives"]
+    prepare --> write["link vendor, write lockfile and autoload"]
 ```
 
 The lockfile path is the important performance path: when `composer.json`
@@ -110,6 +110,22 @@ Use `install --unsafe-trust-store` to relink from an existing store without
 verifying stored archives. This can help when archive hashing dominates relink
 time, but it skips archive tamper detection and assumes `.concerto/store` is
 already trusted.
+
+## Install safety
+
+Package archives are downloaded to temporary files, checked against Packagist
+SHA-1 when present, hashed with BLAKE3, extracted into staging directories, and
+published into `.concerto/store` only after verification succeeds.
+
+`vendor/` entries are symlinks to immutable store sources. During install,
+Concerto records each created or replaced symlink. If a later link, lockfile, or
+autoload step fails, it rolls those changes back in reverse order and preserves
+the existing safety check that rejects non-symlink vendor paths.
+
+`concerto.lock`, `vendor/autoload.php`, and `vendor/concerto_autoload.php` are
+written through temporary sidecar files. When an install cannot finish, Concerto
+keeps the previous lockfile/autoload state intact enough for the next install to
+recover.
 
 ## Autoload
 
@@ -160,7 +176,19 @@ run overhead and reports median/p95 timings plus perf-event breakdowns:
 scripts/bench-concerto.sh
 ```
 
-Example output:
+Example local relink output:
+
+```text
+Concerto local relink benchmark
+case=multi-app packages=17 iterations=15
+strict relink
+  total                 median=23ms p95=25ms
+  autoload_write        median=2ms p95=2ms
+unsafe trusted relink
+  total                 median=22ms p95=24ms
+```
+
+Example Composer comparison output:
 
 ```text
 Average over 6 cases (11 packages average):
@@ -202,11 +230,11 @@ Useful events include `resolve_candidates`, `resolve_providers`, `resolve_solver
 | `src/http/` | HTTP client setup |
 | `src/installer/` | install orchestration |
 | `src/lockfile/` | lockfile read/write and root matching |
-| `src/package_store/` | archive download, extraction, reuse and vendor links |
+| `src/package_store/` | archive download, integrity checks, extraction, reuse, vendor links and rollback |
 | `src/packagist/` | Packagist metadata parsing and version selection |
 | `src/perf/` | optional performance logs |
 | `src/platform/` | PHP and extension checks |
-| `src/resolver/` | dependency batches and constraint merging |
+| `src/resolver/` | PubGrub-backed dependency resolution |
 | `tests/fixtures/` | offline Packagist and archive fixtures |
 
 Production modules keep implementation in `mod.rs` and colocated unit tests in
