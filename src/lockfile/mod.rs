@@ -17,6 +17,10 @@ pub(crate) struct LockedPackage {
     pub version: String,
     pub dist_url: String,
     #[serde(default)]
+    pub dist_integrity: Option<String>,
+    #[serde(default)]
+    pub dist_shasum: Option<String>,
+    #[serde(default)]
     pub dev: bool,
     pub package_requires: Vec<RequiredPackage>,
     pub platform_requires: Vec<RequiredPackage>,

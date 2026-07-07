@@ -23,6 +23,7 @@ const MAX_PARALLEL_CANDIDATE_FETCHES: usize = 8;
 pub(crate) struct ResolvedPackageEntry {
     pub version: String,
     pub dist_url: String,
+    pub dist_shasum: Option<String>,
     pub constraints: Vec<String>,
     pub package_requires: Vec<RequiredPackage>,
     pub platform_requires: Vec<RequiredPackage>,
@@ -903,6 +904,7 @@ fn resolved_package_entries(
                 ResolvedPackageEntry {
                     version: release.version,
                     dist_url: release.dist_url,
+                    dist_shasum: release.dist_shasum,
                     constraints: package_constraints,
                     package_requires: release.package_requires,
                     platform_requires: release.platform_requires,
@@ -1716,6 +1718,7 @@ mod tests {
             version_count: 2,
             version: version.to_string(),
             dist_url: format!("https://example.com/{version}.zip"),
+            dist_shasum: None,
             package_requires: package_requires.to_vec(),
             platform_requires: Vec::new(),
             conflicts: conflicts.to_vec(),

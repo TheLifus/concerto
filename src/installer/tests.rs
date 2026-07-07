@@ -9,6 +9,8 @@ fn rejects_unmet_locked_platform_requirements() {
         name: "symfony/console".to_string(),
         version: "8.0.0".to_string(),
         dist_url: "https://example.com/symfony-console.zip".to_string(),
+        dist_integrity: Some("blake3:test".to_string()),
+        dist_shasum: None,
         package_requires: Vec::new(),
         platform_requires: vec![required_package("php", ">=8.4")],
         dev: false,
@@ -33,6 +35,7 @@ fn rejects_unmet_resolved_platform_requirements() {
         ResolvedPackageEntry {
             version: "8.0.0".to_string(),
             dist_url: "https://example.com/symfony-console.zip".to_string(),
+            dist_shasum: None,
             constraints: vec!["^8.0".to_string()],
             package_requires: Vec::new(),
             platform_requires: vec![required_package("ext-intl", "*")],
@@ -62,7 +65,9 @@ fn lockfile_includes_root_repositories_in_manifest_hash() {
         repositories.clone(),
         &[required_package("psr/log", "^3.0")],
         &ResolvedPackages::new(),
-    );
+        &PackageIntegrities::new(),
+    )
+    .unwrap();
 
     assert_eq!(lockfile.root_repositories, repositories);
     assert!(lockfile::matches_root_manifest(
@@ -99,7 +104,9 @@ fn lockfile_marks_packages_outside_production_graph_as_dev() {
         Vec::new(),
         &[required_package("psr/log", "^3.0")],
         &resolved_packages,
-    );
+        &integrities(&["psr/log", "monolog/monolog"]),
+    )
+    .unwrap();
 
     assert!(!locked_package(&lockfile, "psr/log").dev);
     assert!(locked_package(&lockfile, "monolog/monolog").dev);
@@ -116,7 +123,9 @@ fn lockfile_marks_production_provider_as_non_dev() {
         Vec::new(),
         &[required_package("psr/log-implementation", "^1.0")],
         &resolved_packages,
-    );
+        &integrities(&["acme/log"]),
+    )
+    .unwrap();
 
     assert!(!locked_package(&lockfile, "acme/log").dev);
 }
@@ -140,12 +149,25 @@ fn resolved_package(package_requires: &[RequiredPackage]) -> ResolvedPackageEntr
     ResolvedPackageEntry {
         version: "1.0.0".to_string(),
         dist_url: "https://example.com/package.zip".to_string(),
+        dist_shasum: None,
         constraints: Vec::new(),
         package_requires: package_requires.to_vec(),
         platform_requires: Vec::new(),
         provides: Vec::new(),
         replaces: Vec::new(),
     }
+}
+
+fn integrities(packages: &[&str]) -> PackageIntegrities {
+    packages
+        .iter()
+        .map(|package| {
+            (
+                package.to_string(),
+                format!("blake3:{}", blake3::hash(package.as_bytes()).to_hex()),
+            )
+        })
+        .collect()
 }
 
 fn platform(php_version: &str, extensions: &[&str]) -> Platform {

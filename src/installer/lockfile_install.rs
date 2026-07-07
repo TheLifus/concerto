@@ -1,8 +1,10 @@
-use super::{MAX_PARALLEL_WORKERS, PackageSourcePreparation, prepare_package_source};
+use super::{
+    MAX_PARALLEL_WORKERS, PackageSourcePreparation, log_integrity_check, prepare_package_source,
+};
 use crate::error::{ConcertoError, Result};
 use crate::install_event::{InstallEventKind, InstallReporter};
 use crate::lockfile::LockedPackage;
-use crate::package_store;
+use crate::package_store::{self, PackageArchive};
 use crate::perf::PerfLogger;
 use std::time::{Duration, Instant};
 
@@ -16,11 +18,15 @@ struct PreparedLockedPackage {
 
 pub(super) fn install(
     packages: &[LockedPackage],
+    unsafe_trust_store: bool,
     perf: &PerfLogger,
     reporter: &InstallReporter,
 ) -> Result<()> {
     let prepare_started_at = Instant::now();
-    let prepared_packages = prepare_sources(packages, reporter)?;
+    let prepared_packages = prepare_sources(packages, unsafe_trust_store, reporter)?;
+    for package in &prepared_packages {
+        log_integrity_check(package.source.integrity_check(), &package.name, perf)?;
+    }
 
     perf.log(
         "lockfile_sources_prepare",
@@ -37,12 +43,13 @@ pub(super) fn install(
 
 fn prepare_sources(
     packages: &[LockedPackage],
+    unsafe_trust_store: bool,
     reporter: &InstallReporter,
 ) -> Result<Vec<PreparedLockedPackage>> {
     let mut prepared = Vec::with_capacity(packages.len());
 
     for batch in packages.chunks(MAX_PARALLEL_WORKERS) {
-        let mut batch = prepare_source_batch(batch)?;
+        let mut batch = prepare_source_batch(batch, unsafe_trust_store)?;
         for package in &batch {
             emit_source_event(package, reporter);
         }
@@ -52,11 +59,14 @@ fn prepare_sources(
     Ok(prepared)
 }
 
-fn prepare_source_batch(packages: &[LockedPackage]) -> Result<Vec<PreparedLockedPackage>> {
+fn prepare_source_batch(
+    packages: &[LockedPackage],
+    unsafe_trust_store: bool,
+) -> Result<Vec<PreparedLockedPackage>> {
     std::thread::scope(|scope| {
         let handles = packages
             .iter()
-            .map(|package| scope.spawn(move || prepare_source(package)))
+            .map(|package| scope.spawn(move || prepare_source(package, unsafe_trust_store)))
             .collect::<Vec<_>>();
 
         let mut prepared = Vec::with_capacity(handles.len());
@@ -72,12 +82,27 @@ fn prepare_source_batch(packages: &[LockedPackage]) -> Result<Vec<PreparedLocked
     })
 }
 
-fn prepare_source(package: &LockedPackage) -> Result<PreparedLockedPackage> {
+fn prepare_source(
+    package: &LockedPackage,
+    unsafe_trust_store: bool,
+) -> Result<PreparedLockedPackage> {
+    let expected_integrity = package.dist_integrity.as_deref().ok_or_else(|| {
+        ConcertoError::lockfile(format!("Missing archive integrity for {}", package.name))
+    })?;
     let PackageSourcePreparation {
         source,
         duration,
         event,
-    } = prepare_package_source(&package.name, &package.version, &package.dist_url)?;
+    } = prepare_package_source(
+        &package.name,
+        PackageArchive {
+            version: &package.version,
+            dist_url: &package.dist_url,
+            expected_integrity: Some(expected_integrity),
+            expected_shasum: package.dist_shasum.as_deref(),
+            unsafe_trust_store,
+        },
+    )?;
 
     Ok(PreparedLockedPackage {
         name: package.name.clone(),

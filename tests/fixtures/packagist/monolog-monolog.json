@@ -4,7 +4,8 @@
       {
         "version": "3.0.0",
         "dist": {
-          "url": "__ARCHIVE_BASE_URL__/monolog-monolog-3.0.0.zip"
+          "url": "__ARCHIVE_BASE_URL__/monolog-monolog-3.0.0.zip",
+          "shasum": "ee258ba725ddd60cd74921ebd8e3e21ff021bf20"
         },
         "require": {
           "php": ">=8.0",

@@ -55,6 +55,7 @@ fn prints_help_without_command() {
     assert!(stdout(&output).contains(USAGE));
     assert!(stdout(&output).contains("install"));
     assert!(stdout(&output).contains("--no-dev"));
+    assert!(stdout(&output).contains("--unsafe-trust-store"));
     assert!(stdout(&output).contains("  -h, --help     Print help"));
     assert!(stdout(&output).contains("  -V, --version  Print version"));
 }
