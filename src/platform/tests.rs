@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[test]
 fn accepts_matching_php_requirement() {
@@ -70,8 +71,8 @@ fn parses_platform_from_php_output() {
     let platform = parse_platform(
         r#"
 8.3.1
-Core
-json
+Core=8.3.1
+json=8.3.1
 PDO
 "#
         .trim_start(),
@@ -83,6 +84,50 @@ PDO
         platform.extensions,
         vec!["core".to_string(), "json".to_string(), "pdo".to_string()]
     );
+    assert_eq!(platform.extension_versions["json"], "8.3.1");
+}
+
+#[test]
+fn accepts_matching_extension_version_requirement() {
+    let requirements = vec![required_package("ext-json", ">=1.7")];
+    let mut platform = platform("8.3.0", &["json"]);
+    platform
+        .extension_versions
+        .insert("json".to_string(), "1.7.0".to_string());
+
+    let result = validate(&requirements, &platform, "symfony/console");
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn rejects_unmet_extension_version_requirement() {
+    let requirements = vec![required_package("ext-json", ">=2.0")];
+    let mut platform = platform("8.3.0", &["json"]);
+    platform
+        .extension_versions
+        .insert("json".to_string(), "1.7.0".to_string());
+
+    let error = validate(&requirements, &platform, "symfony/console")
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("ext-json"));
+    assert!(error.contains(">=2.0"));
+    assert!(error.contains("1.7.0"));
+}
+
+#[test]
+fn rejects_extension_version_requirement_when_version_is_unknown() {
+    let requirements = vec![required_package("ext-json", ">=1.0")];
+    let platform = platform("8.3.0", &["json"]);
+
+    let error = validate(&requirements, &platform, "symfony/console")
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("ext-json"));
+    assert!(error.contains("version unknown"));
 }
 
 #[test]
@@ -119,5 +164,6 @@ fn platform(php_version: &str, extensions: &[&str]) -> Platform {
             .iter()
             .map(|extension| extension.to_string())
             .collect(),
+        extension_versions: HashMap::new(),
     }
 }

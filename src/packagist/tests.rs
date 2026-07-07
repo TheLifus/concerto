@@ -1,5 +1,6 @@
 use super::*;
 use crate::platform::Platform;
+use std::collections::HashMap;
 
 fn constraints(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
@@ -12,6 +13,7 @@ fn platform(php_version: &str, extensions: &[&str]) -> Platform {
             .iter()
             .map(|extension| extension.to_string())
             .collect(),
+        extension_versions: HashMap::new(),
     }
 }
 
@@ -20,6 +22,47 @@ fn builds_package_url() {
     let url = package_url("monolog/monolog").unwrap();
 
     assert_eq!(url, "https://repo.packagist.org/p2/monolog/monolog.json");
+}
+
+#[test]
+fn builds_repository_package_url() {
+    let url = repository_package_url("https://repo.example.com", "monolog/monolog").unwrap();
+
+    assert_eq!(url, "https://repo.example.com/p2/monolog/monolog.json");
+}
+
+#[test]
+fn builds_provider_url() {
+    let url = providers_url("psr/log-implementation").unwrap();
+
+    assert_eq!(
+        url,
+        "https://packagist.org/providers/psr/log-implementation.json"
+    );
+}
+
+#[test]
+fn reads_provider_names() {
+    let metadata_json = r#"
+{
+    "providers": [
+        { "name": "acme/logger" },
+        { "name": "acme/logger" },
+        { "name": "monolog/monolog" }
+    ]
+}
+"#;
+    let names = provider_names(
+        metadata_json,
+        "psr/log-implementation",
+        &constraints(&["^1.0"]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        names,
+        vec!["acme/logger".to_string(), "monolog/monolog".to_string()]
+    );
 }
 
 #[test]
@@ -186,6 +229,52 @@ fn does_not_parse_require_for_release_that_does_not_match_constraint() {
 }
 
 #[test]
+fn inherits_missing_release_require_from_previous_packagist_entry() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "symfony/console": [
+            {
+                "version": "7.4.14",
+                "dist": {
+                    "url": "https://example.com/7.4.14.zip"
+                },
+                "require": {
+                    "php": ">=8.2",
+                    "symfony/string": "^7.2|^8.0"
+                }
+            },
+            {
+                "version": "7.4.13",
+                "dist": {
+                    "url": "https://example.com/7.4.13.zip"
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["7.4.13"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "symfony/console",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(release.version, "7.4.13");
+    assert_eq!(
+        release.package_requires,
+        vec![RequiredPackage {
+            name: "symfony/string".to_string(),
+            constraint: "^7.2|^8.0".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn treats_unset_require_as_empty_requirements() {
     let metadata_json = r#"
 {
@@ -215,6 +304,64 @@ fn treats_unset_require_as_empty_requirements() {
     assert_eq!(release.version, "1.0.0");
     assert_eq!(release.package_requires, Vec::new());
     assert_eq!(release.platform_requires, Vec::new());
+}
+
+#[test]
+fn reads_conflict_provide_and_replace_links() {
+    let metadata_json = r#"
+{
+    "packages": {
+        "acme/logger": [
+            {
+                "version": "1.0.0",
+                "dist": {
+                    "url": "https://example.com/1.0.0.zip"
+                },
+                "conflict": {
+                    "acme/broken": "<2.0"
+                },
+                "provide": {
+                    "psr/log-implementation": "1.0.0"
+                },
+                "replace": {
+                    "acme/old-logger": "self.version"
+                }
+            }
+        ]
+    }
+}
+"#;
+
+    let constraints = constraints(&["^1.0"]);
+    let release = first_release_candidate(
+        metadata_json,
+        "acme/logger",
+        &constraints,
+        &platform("8.2.0", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        release.conflicts,
+        vec![RequiredPackage {
+            name: "acme/broken".to_string(),
+            constraint: "<2.0".to_string(),
+        }]
+    );
+    assert_eq!(
+        release.provides,
+        vec![RequiredPackage {
+            name: "psr/log-implementation".to_string(),
+            constraint: "1.0.0".to_string(),
+        }]
+    );
+    assert_eq!(
+        release.replaces,
+        vec![RequiredPackage {
+            name: "acme/old-logger".to_string(),
+            constraint: "self.version".to_string(),
+        }]
+    );
 }
 
 #[test]
@@ -353,7 +500,8 @@ fn skips_releases_with_unsupported_library_requirement() {
                 "version": "1.0.0",
                 "dist": {
                     "url": "https://example.com/1.0.0.zip"
-                }
+                },
+                "require": "__unset"
             }
         ]
     }

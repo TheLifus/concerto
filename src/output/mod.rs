@@ -1,7 +1,7 @@
 mod plain;
 mod tui;
 
-use crate::cli::OutputMode;
+use crate::cli::{InstallOptions, OutputMode};
 use crate::error::{ConcertoError, Result};
 use crate::install_event::{InstallEvent, InstallReporter, InstallSummary};
 use crate::installer;
@@ -9,7 +9,8 @@ use std::io::IsTerminal;
 use std::sync::mpsc;
 use std::time::Duration;
 
-pub(crate) fn install(requested_mode: OutputMode) -> Result<()> {
+pub(crate) fn install(options: InstallOptions) -> Result<()> {
+    let requested_mode = options.output_mode;
     let is_terminal = std::io::stdout().is_terminal();
     let mut selected_mode = select_output_mode(
         requested_mode,
@@ -41,7 +42,7 @@ pub(crate) fn install(requested_mode: OutputMode) -> Result<()> {
     let reporter = InstallReporter::new(event_sender);
 
     std::thread::spawn(move || {
-        let result = installer::install(reporter);
+        let result = installer::install(reporter, options.include_dev);
         let _ = result_sender.send(result);
     });
 

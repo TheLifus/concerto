@@ -1,16 +1,18 @@
 use crate::composer::RequiredPackage;
 use crate::error::{ConcertoError, Result};
+use std::collections::HashMap;
 use std::process::Command;
 
 const PLATFORM_EXTENSIONS_ENV: &str = "CONCERTO_PLATFORM_EXTENSIONS";
 const PLATFORM_PHP_ENV: &str = "CONCERTO_PLATFORM_PHP";
 const PHP_PLATFORM_SCRIPT: &str = "echo PHP_VERSION, PHP_EOL; foreach \
-    (get_loaded_extensions() as $extension) { echo $extension, PHP_EOL; }";
+    (get_loaded_extensions() as $extension) { echo $extension, '=', phpversion($extension) ?: '', PHP_EOL; }";
 
 #[derive(Debug)]
 pub(crate) struct Platform {
     pub php_version: String,
     pub extensions: Vec<String>,
+    pub extension_versions: HashMap<String, String>,
 }
 
 pub(crate) fn validate(
@@ -62,15 +64,39 @@ fn validate_extension_requirement(
     let requirement_name = requirement.name.to_lowercase();
     let extension = requirement_name.trim_start_matches("ext-");
 
-    if platform
+    if !platform
         .extensions
         .iter()
         .any(|installed| installed == extension)
     {
+        return Err(platform_error(package_name, requirement, "missing"));
+    }
+
+    if requirement.constraint == "*" {
         return Ok(());
     }
 
-    Err(platform_error(package_name, requirement, "missing"))
+    let Some(version) = platform.extension_versions.get(extension) else {
+        return Err(platform_error(
+            package_name,
+            requirement,
+            "installed, version unknown",
+        ));
+    };
+
+    let matches =
+        semver_php::Semver::satisfies(version, &requirement.constraint).map_err(|error| {
+            ConcertoError::platform_detection(format!(
+                "Could not check {} requirement: {error}",
+                requirement.name
+            ))
+        })?;
+
+    if matches {
+        return Ok(());
+    }
+
+    Err(platform_error(package_name, requirement, version))
 }
 
 fn platform_error(
@@ -87,9 +113,12 @@ fn platform_error(
 
 pub(crate) fn current() -> Result<Platform> {
     if let Ok(php_version) = std::env::var(PLATFORM_PHP_ENV) {
+        let (extensions, extension_versions) = env_extensions();
+
         return Ok(Platform {
             php_version,
-            extensions: env_extensions(),
+            extensions,
+            extension_versions,
         });
     }
 
@@ -125,26 +154,53 @@ fn parse_platform(output: &str) -> Result<Platform> {
         .ok_or_else(|| ConcertoError::platform_detection("Could not detect PHP version"))?
         .trim()
         .to_string();
-    let extensions = lines
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let (extensions, extension_versions) = lines
+        .map(parse_extension_line)
+        .filter(|(extension, _)| !extension.is_empty())
+        .fold(
+            (Vec::new(), HashMap::new()),
+            |(mut extensions, mut versions), (extension, version)| {
+                extensions.push(extension.clone());
+                if !version.is_empty() {
+                    versions.insert(extension, version);
+                }
+                (extensions, versions)
+            },
+        );
 
     Ok(Platform {
         php_version,
         extensions,
+        extension_versions,
     })
 }
 
-fn env_extensions() -> Vec<String> {
+fn env_extensions() -> (Vec<String>, HashMap<String, String>) {
     std::env::var(PLATFORM_EXTENSIONS_ENV)
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
         .filter(|extension| !extension.is_empty())
-        .map(str::to_lowercase)
-        .collect()
+        .map(parse_extension_line)
+        .fold(
+            (Vec::new(), HashMap::new()),
+            |(mut extensions, mut versions), (extension, version)| {
+                extensions.push(extension.clone());
+                if !version.is_empty() {
+                    versions.insert(extension, version);
+                }
+                (extensions, versions)
+            },
+        )
+}
+
+fn parse_extension_line(line: &str) -> (String, String) {
+    let (extension, version) = line
+        .split_once('=')
+        .or_else(|| line.split_once(':'))
+        .unwrap_or((line, ""));
+
+    (extension.trim().to_lowercase(), version.trim().to_string())
 }
 
 #[cfg(test)]

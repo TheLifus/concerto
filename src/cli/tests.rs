@@ -9,7 +9,7 @@ fn parses_install_command() {
     let command = parse(&["install"]);
 
     assert!(
-        matches!(command, Command::Install(options) if options.output_mode == OutputMode::Auto)
+        matches!(command, Command::Install(options) if options.output_mode == OutputMode::Auto && options.include_dev)
     );
 }
 
@@ -35,6 +35,15 @@ fn parses_install_without_progress_as_plain_output() {
 
     assert!(
         matches!(command, Command::Install(options) if options.output_mode == OutputMode::Plain)
+    );
+}
+
+#[test]
+fn parses_install_without_dev_packages() {
+    let command = parse(&["install", "--no-dev"]);
+
+    assert!(
+        matches!(command, Command::Install(options) if options.output_mode == OutputMode::Auto && !options.include_dev)
     );
 }
 

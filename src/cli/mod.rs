@@ -8,6 +8,7 @@ pub(crate) enum OutputMode {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct InstallOptions {
     pub output_mode: OutputMode,
+    pub include_dev: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -28,6 +29,7 @@ Install options:
       --ui              Force terminal UI output
       --plain           Force plain text output
       --no-progress     Disable progress UI
+      --no-dev          Skip composer.json require-dev packages
 
 Global options:
   -h, --help     Print help
@@ -48,17 +50,22 @@ pub(crate) fn parse_command(arguments: impl IntoIterator<Item = String>) -> Comm
 
 fn parse_install_options(arguments: impl IntoIterator<Item = String>) -> Command {
     let mut output_mode = OutputMode::Auto;
+    let mut include_dev = true;
 
     for argument in arguments {
         match argument.as_str() {
             "--ui" => output_mode = OutputMode::Tui,
             "--plain" | "--no-progress" => output_mode = OutputMode::Plain,
+            "--no-dev" => include_dev = false,
             "-h" | "--help" => return Command::Help,
             unknown => return Command::Unknown(unknown.to_string()),
         }
     }
 
-    Command::Install(InstallOptions { output_mode })
+    Command::Install(InstallOptions {
+        output_mode,
+        include_dev,
+    })
 }
 
 #[cfg(test)]

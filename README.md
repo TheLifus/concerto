@@ -59,23 +59,21 @@ minimal Composer-style autoloader.
 
 | Area | Supported today |
 | --- | --- |
-| Package input | `composer.json` `require` |
-| Registry | Packagist metadata |
-| Resolution | Composer-like constraints, transitive dependencies, platform-aware selection |
+| Package input | `composer.json` `require`, root platform requirements, `require-dev` by default, `suggest` no-op |
+| Registry | `type: composer` repositories using P2 metadata and provider metadata, then Packagist fallback |
+| Resolution | PubGrub-backed Composer-like constraints, transitive dependencies, `conflict`, `provide`, `replace`, virtual provider discovery, platform-aware selection |
 | Store | local `.concerto/store` with source reuse |
 | Install | `vendor/` symlinks, lockfile fast path |
-| Platform | `php`, installed `ext-*`; `lib-*` is reported as unsupported |
+| Platform | `php`, installed `ext-*` with version constraints when PHP reports a version; `lib-*` is reported as unsupported |
 | Autoload | `psr-4`, `psr-0`, `files`, `classmap` |
 | CLI | `install`, `--help`, `--version` |
 | Tests | unit tests, CLI tests, offline install fixtures, ignored E2E benchmarks |
 
 Still out of scope for now:
 
-- `require-dev`
-- `conflict`, `replace`, `provide`, `suggest`
-- custom repositories
-- Composer scripts and plugins
-- extension version constraints
+- installing or displaying `suggest`
+- non-`composer` repository types such as `vcs` and `path`
+- Composer scripts and plugins, which fail with explicit errors
 - global content-addressable store
 - full Composer solver parity
 
@@ -99,6 +97,10 @@ and regenerates autoload files.
 
 The lockfile format is documented in [docs/lockfile.md](docs/lockfile.md).
 
+`require-dev` is installed by default, matching Composer. Use `install --no-dev`
+to install only production requirements from the complete lockfile without
+rewriting it.
+
 ## Autoload
 
 Concerto generates:
@@ -118,13 +120,13 @@ future work.
 Concerto detects the local PHP platform before install:
 
 - `php` uses `php -r 'echo PHP_VERSION;'`
-- `ext-*` uses the loaded extension list from `php -m`
+- `ext-*` uses the loaded extension list and `phpversion($extension)` when available
 - `lib-*` is recognized but currently fails as unsupported
 
 For deterministic tests and benchmarks, the detected platform can be overridden:
 
 ```bash
-CONCERTO_PLATFORM_PHP=8.3.0 CONCERTO_PLATFORM_EXTENSIONS=json,mbstring concerto install
+CONCERTO_PLATFORM_PHP=8.3.0 CONCERTO_PLATFORM_EXTENSIONS=json:1.7.0,mbstring concerto install
 ```
 
 When a package cannot be installed, errors include the package name, failed
@@ -166,7 +168,7 @@ Logs are appended to:
 .concerto/logs/perf.log
 ```
 
-Useful events include `resolve_package`, `sources_prepare`,
+Useful events include `resolve_candidates`, `resolve_providers`, `resolve_solver`, `resolve_package`, `sources_prepare`,
 `source_download_extract`, `source_reuse`, `vendor_link`, `autoload_write`,
 `platform_current`, `lockfile_install`, and `lockfile_write`.
 
