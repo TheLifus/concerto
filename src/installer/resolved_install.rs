@@ -1,10 +1,10 @@
 use super::{
-    MAX_PARALLEL_WORKERS, PackageIntegrities, PackageSourcePreparation, log_integrity_check,
-    prepare_package_source,
+    MAX_PARALLEL_WORKERS, PackageIntegrities, PackageSourcePreparation, install_vendor_links,
+    log_integrity_check, prepare_package_source,
 };
 use crate::error::{ConcertoError, Result};
 use crate::install_event::{InstallEventKind, InstallReporter};
-use crate::package_store::{self, PackageArchive};
+use crate::package_store::{self, PackageArchive, VendorLinkChange};
 use crate::packagist::PackagistRelease;
 use crate::perf::PerfLogger;
 use crate::resolver::{ResolutionObserver, ResolvedPackageEntry, ResolvedPackages};
@@ -37,7 +37,7 @@ pub(super) fn install(
     perf: &PerfLogger,
     reporter: &InstallReporter,
     speculative_preparer: Option<SpeculativePreparer>,
-) -> Result<PackageIntegrities> {
+) -> Result<(PackageIntegrities, Vec<VendorLinkChange>)> {
     let prepare_started_at = Instant::now();
     let prepared_packages = prepare_sources(resolved_packages, reporter, speculative_preparer)?;
     let integrities = prepared_packages
@@ -54,13 +54,14 @@ pub(super) fn install(
         &[("packages", prepared_packages.len().to_string())],
     )?;
 
-    for package in prepared_packages {
-        if active_names.contains(&package.name) {
-            install_prepared_package(package, perf, reporter)?;
-        }
-    }
+    let link_changes = install_vendor_links(
+        prepared_packages
+            .iter()
+            .filter(|package| active_names.contains(&package.name)),
+        |package| install_prepared_package(package, perf, reporter),
+    )?;
 
-    Ok(integrities)
+    Ok((integrities, link_changes))
 }
 
 impl SpeculativePreparer {
@@ -123,10 +124,10 @@ impl ResolutionObserver for SpeculativePreparer {
 }
 
 fn install_prepared_package(
-    package: PreparedPackage,
+    package: &PreparedPackage,
     perf: &PerfLogger,
     reporter: &InstallReporter,
-) -> Result<()> {
+) -> Result<VendorLinkChange> {
     perf.log(
         package.source_event,
         package.source_duration,
@@ -134,19 +135,19 @@ fn install_prepared_package(
     )?;
 
     let link_started_at = Instant::now();
-    package_store::link_to_vendor(&package.source)?;
+    let link_change = package_store::link_to_vendor(&package.source)?;
     perf.log(
         "vendor_link",
         link_started_at.elapsed(),
         &[("package", package.name.clone())],
     )?;
     reporter.emit(InstallEventKind::VendorLinked {
-        package: package.name,
-        version: package.version,
+        package: package.name.clone(),
+        version: package.version.clone(),
         path: InstallReporter::path(package.source.path()),
     });
 
-    Ok(())
+    Ok(link_change)
 }
 
 fn emit_source_event(package: &PreparedPackage, reporter: &InstallReporter) {

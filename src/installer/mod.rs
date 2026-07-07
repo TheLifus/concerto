@@ -7,7 +7,7 @@ use crate::install_event::{InstallEventKind, InstallReporter, InstallSummary};
 use crate::lockfile::{self, LockedPackage, Lockfile};
 
 use crate::composer::{ComposerRepository, RequiredPackage, manifest};
-use crate::package_store::{self, IntegrityCheckKind, PackageArchive};
+use crate::package_store::{self, IntegrityCheckKind, PackageArchive, VendorLinkChange};
 use crate::perf::PerfLogger;
 use crate::platform;
 use crate::resolver::{self, ResolveContext, ResolvedPackages};
@@ -119,14 +119,19 @@ fn install_from_lockfile(
     validate_locked_platform_requirements(&lockfile.packages, context.platform)?;
     let lockfile_started_at = Instant::now();
 
-    lockfile_install::install(
+    let link_changes = lockfile_install::install(
         &lockfile.packages,
         context.unsafe_trust_store,
         context.perf,
         context.reporter,
     )?;
 
-    write_autoload(&lockfile, context.root_composer_json, context.perf)?;
+    write_autoload_or_rollback(
+        &lockfile,
+        context.root_composer_json,
+        context.perf,
+        &link_changes,
+    )?;
     context.reporter.emit(InstallEventKind::AutoloadWritten {
         packages: lockfile.packages.len(),
     });
@@ -182,7 +187,7 @@ fn install_from_resolution(
     let active_resolved_packages = selected_resolved_packages(&resolved_packages, &active_names);
     validate_resolved_platform_requirements(&active_resolved_packages, context.platform)?;
     let package_count = active_resolved_packages.len();
-    let integrities = resolved_install::install(
+    let (integrities, link_changes) = resolved_install::install(
         &resolved_packages,
         &active_names,
         context.perf,
@@ -197,17 +202,29 @@ fn install_from_resolution(
         &integrities,
     )?;
 
+    let previous_lockfile = read_lockfile_content()?;
+    let lockfile_started_at = Instant::now();
+    if let Err(error) = lockfile::write(&lockfile) {
+        package_store::rollback_vendor_links(&link_changes)?;
+
+        return Err(error);
+    }
+    let lockfile_duration = lockfile_started_at.elapsed();
     let active_lockfile = active_lockfile(lockfile.clone(), request.include_dev);
-    write_autoload(&active_lockfile, context.root_composer_json, context.perf)?;
+    if let Err(error) = write_autoload(&active_lockfile, context.root_composer_json, context.perf) {
+        let restore_result = restore_lockfile_content(previous_lockfile);
+        let rollback_result = package_store::rollback_vendor_links(&link_changes);
+
+        restore_result?;
+        rollback_result?;
+
+        return Err(error);
+    }
     context.reporter.emit(InstallEventKind::AutoloadWritten {
         packages: active_lockfile.packages.len(),
     });
-    let lockfile_started_at = Instant::now();
-    lockfile::write(&lockfile)?;
     context.reporter.emit(InstallEventKind::LockfileWritten);
-    context
-        .perf
-        .log("lockfile_write", lockfile_started_at.elapsed(), &[])?;
+    context.perf.log("lockfile_write", lockfile_duration, &[])?;
 
     finish_install(package_count, context)
 }
@@ -232,6 +249,68 @@ fn write_autoload(lockfile: &Lockfile, root_composer_json: &str, perf: &PerfLogg
         started_at.elapsed(),
         &[("packages", lockfile.packages.len().to_string())],
     )
+}
+
+fn read_lockfile_content() -> Result<Option<String>> {
+    match std::fs::read_to_string(lockfile::LOCKFILE_PATH) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ConcertoError::lockfile(format!(
+            "Could not backup lockfile: {error}"
+        ))),
+    }
+}
+
+fn restore_lockfile_content(content: Option<String>) -> Result<()> {
+    match content {
+        Some(content) => std::fs::write(lockfile::LOCKFILE_PATH, content).map_err(|error| {
+            ConcertoError::lockfile(format!("Could not restore lockfile: {error}"))
+        }),
+        None => match std::fs::remove_file(lockfile::LOCKFILE_PATH) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ConcertoError::lockfile(format!(
+                "Could not remove new lockfile: {error}"
+            ))),
+        },
+    }
+}
+
+fn write_autoload_or_rollback(
+    lockfile: &Lockfile,
+    root_composer_json: &str,
+    perf: &PerfLogger,
+    link_changes: &[VendorLinkChange],
+) -> Result<()> {
+    match write_autoload(lockfile, root_composer_json, perf) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            package_store::rollback_vendor_links(link_changes)?;
+
+            Err(error)
+        }
+    }
+}
+
+pub(super) fn install_vendor_links<I, F>(items: I, mut install: F) -> Result<Vec<VendorLinkChange>>
+where
+    I: IntoIterator,
+    F: FnMut(I::Item) -> Result<VendorLinkChange>,
+{
+    let mut link_changes = Vec::new();
+
+    for item in items {
+        match install(item) {
+            Ok(change) => link_changes.push(change),
+            Err(error) => {
+                package_store::rollback_vendor_links(&link_changes)?;
+
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(link_changes)
 }
 
 fn detect_platform(perf: &PerfLogger, reporter: &InstallReporter) -> Result<platform::Platform> {

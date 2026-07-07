@@ -3,6 +3,7 @@ use crate::error::{ConcertoError, Result};
 use crate::lockfile::{LockedPackage, Lockfile};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 const AUTOLOAD_PATH: &str = "vendor/autoload.php";
@@ -16,18 +17,147 @@ struct AutoloadMap {
     files: Vec<String>,
 }
 
+struct AutoloadBackup {
+    path: PathBuf,
+    backup: Option<PathBuf>,
+}
+
 pub(crate) fn write(lockfile: &Lockfile, root_composer_json: &str) -> Result<()> {
     let autoload = read_autoload_map(lockfile, root_composer_json)?;
+    let files = [
+        (Path::new(LOADER_PATH), loader_file(&autoload)?),
+        (Path::new(AUTOLOAD_PATH), autoload_file()),
+    ];
 
-    std::fs::write(LOADER_PATH, loader_file(&autoload)?).map_err(|error| {
-        ConcertoError::autoload(format!("Could not write autoload map: {error}"))
-    })?;
+    write_autoload_files(&files)
+}
 
-    std::fs::write(AUTOLOAD_PATH, autoload_file()).map_err(|error| {
-        ConcertoError::autoload(format!("Could not write autoload file: {error}"))
-    })?;
+fn write_autoload_files(files: &[(&Path, String)]) -> Result<()> {
+    let mut temps = Vec::with_capacity(files.len());
+
+    for (path, content) in files {
+        let temp = temporary_autoload_path(path)?;
+
+        if let Err(error) = std::fs::write(&temp, content) {
+            remove_temporary_autoload_files(&temps);
+
+            return Err(ConcertoError::autoload(format!(
+                "Could not write temporary autoload file {}: {error}",
+                temp.display()
+            )));
+        }
+
+        temps.push(temp);
+    }
+
+    let backups = match backup_autoload_files(files) {
+        Ok(backups) => backups,
+        Err(error) => {
+            remove_temporary_autoload_files(&temps);
+
+            return Err(error);
+        }
+    };
+
+    for ((path, _), temp) in files.iter().zip(&temps) {
+        if let Err(error) = std::fs::rename(temp, path) {
+            restore_autoload_files(&backups);
+            remove_temporary_autoload_files(&temps);
+
+            return Err(ConcertoError::autoload(format!(
+                "Could not publish autoload file {}: {error}",
+                path.display()
+            )));
+        }
+    }
+
+    remove_autoload_backups(&backups);
 
     Ok(())
+}
+
+fn temporary_autoload_path(path: &Path) -> Result<PathBuf> {
+    sidecar_autoload_path(path, "tmp")
+}
+
+fn backup_autoload_path(path: &Path) -> Result<PathBuf> {
+    sidecar_autoload_path(path, &format!("{}.bak", std::process::id()))
+}
+
+fn sidecar_autoload_path(path: &Path, suffix: &str) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            ConcertoError::autoload(format!("Invalid autoload path {}", path.display()))
+        })?;
+
+    Ok(path.with_file_name(format!("{file_name}.{suffix}")))
+}
+
+fn backup_autoload_files(files: &[(&Path, String)]) -> Result<Vec<AutoloadBackup>> {
+    let mut backups = Vec::with_capacity(files.len());
+
+    for (path, _) in files {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                let backup = backup_autoload_path(path)?;
+
+                let _ = std::fs::remove_file(&backup);
+                if let Err(error) = std::fs::rename(path, &backup) {
+                    restore_autoload_files(&backups);
+
+                    return Err(ConcertoError::autoload(format!(
+                        "Could not backup autoload file {}: {error}",
+                        path.display()
+                    )));
+                }
+
+                backups.push(AutoloadBackup {
+                    path: path.to_path_buf(),
+                    backup: Some(backup),
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => backups.push(AutoloadBackup {
+                path: path.to_path_buf(),
+                backup: None,
+            }),
+            Err(error) => {
+                restore_autoload_files(&backups);
+
+                return Err(ConcertoError::autoload(format!(
+                    "Could not inspect autoload file {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    Ok(backups)
+}
+
+fn remove_temporary_autoload_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn restore_autoload_files(backups: &[AutoloadBackup]) {
+    for backup in backups.iter().rev() {
+        let _ = std::fs::remove_file(&backup.path);
+
+        if let Some(backup_path) = &backup.backup {
+            let _ = std::fs::rename(backup_path, &backup.path);
+        }
+    }
+}
+
+fn remove_autoload_backups(backups: &[AutoloadBackup]) {
+    for backup in backups {
+        if let Some(backup_path) = &backup.backup {
+            let _ = std::fs::remove_file(backup_path);
+        }
+    }
 }
 
 fn read_autoload_map(lockfile: &Lockfile, root_composer_json: &str) -> Result<AutoloadMap> {
