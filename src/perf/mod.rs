@@ -2,8 +2,7 @@ use crate::error::{ConcertoError, Result};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PERF_LOG_PATH: &str = ".concerto/logs/perf.log";
 const PERF_ENV: &str = "CONCERTO_DEBUG_PERF";
@@ -89,18 +88,10 @@ impl PerfLogger {
 }
 
 fn formatted_now() -> Result<String> {
-    let output = Command::new("date")
-        .arg("+%d/%m/%Y %H:%M:%S")
-        .output()
-        .map_err(|error| ConcertoError::perf(format!("Could not format perf log date: {error}")))?;
-
-    if !output.status.success() {
-        return Err(ConcertoError::perf("Could not format perf log date"));
-    }
-
-    String::from_utf8(output.stdout)
-        .map(|output| output.trim().to_string())
-        .map_err(|error| ConcertoError::perf(format!("Invalid perf log date output: {error}")))
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .map_err(|error| ConcertoError::perf(format!("Could not read system time: {error}")))
 }
 
 fn perf_log_path() -> Result<&'static Path> {

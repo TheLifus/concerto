@@ -147,9 +147,9 @@ Example output:
 
 ```text
 Average over 6 cases (11 packages average):
-  Cold install: Concerto is 1.5x faster than Composer (1030ms vs 1518ms).
-  Lock install: Concerto is 2.8x faster than Composer warm (235ms vs 659ms).
-  Vendor relink: Concerto averages 255ms.
+  Cold install: Concerto is 1.6x faster than Composer (1048ms vs 1651ms).
+  Lock install: Concerto is 2.9x faster than Composer warm (225ms vs 657ms).
+  Vendor relink: Concerto averages 231ms.
 ```
 
 Read the benchmark as a direction, not a contract. Concerto currently does less

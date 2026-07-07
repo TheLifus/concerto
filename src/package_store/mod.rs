@@ -7,6 +7,7 @@ struct PackagePaths {
     package_name: String,
     vendor_link: PathBuf,
     zip: PathBuf,
+    store: PathBuf,
     published_source: PathBuf,
     staged_source: PathBuf,
 }
@@ -79,6 +80,16 @@ pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<()> {
         })?;
     }
 
+    if let Some(parent) = source.vendor_link.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            ConcertoError::store(
+                &source.package_name,
+                StoreStep::Link,
+                format!("could not create vendor directory: {error}"),
+            )
+        })?;
+    }
+
     std::os::unix::fs::symlink(&source.path, &source.vendor_link).map_err(|error| {
         ConcertoError::store(
             &source.package_name,
@@ -99,34 +110,12 @@ fn package_paths(package_name: &str, version: &str) -> Result<PackagePaths> {
     let vendor_parent = PathBuf::from("vendor").join(vendor);
     let vendor_link = vendor_parent.join(name);
 
-    std::fs::create_dir_all(&store).map_err(|error| {
-        ConcertoError::store(
-            package_name,
-            StoreStep::Prepare,
-            format!("could not create package store directory: {error}"),
-        )
-    })?;
-    std::fs::create_dir_all(&vendor_parent).map_err(|error| {
-        ConcertoError::store(
-            package_name,
-            StoreStep::Prepare,
-            format!("could not create vendor directory: {error}"),
-        )
-    })?;
-
-    let store = std::fs::canonicalize(&store).map_err(|error| {
-        ConcertoError::store(
-            package_name,
-            StoreStep::Prepare,
-            format!("could not resolve package store directory: {error}"),
-        )
-    })?;
-
     Ok(PackagePaths {
         package_name: package_name.to_string(),
         zip: store.join("package.zip"),
         published_source: store.join("source"),
         staged_source: store.join("source.tmp"),
+        store,
         vendor_link,
     })
 }
@@ -149,6 +138,14 @@ fn download_and_publish_source(
     archive: PackageArchive<'_>,
     paths: &PackagePaths,
 ) -> Result<PathBuf> {
+    std::fs::create_dir_all(&paths.store).map_err(|error| {
+        ConcertoError::store(
+            paths.package_name(),
+            StoreStep::Prepare,
+            format!("could not create package store directory: {error}"),
+        )
+    })?;
+
     download_to_file(archive.dist_url, &paths.zip).map_err(|error| {
         ConcertoError::store_with_hint(
             paths.package_name(),
@@ -204,7 +201,10 @@ fn clean_staged_source(paths: &PackagePaths) -> Result<()> {
 }
 
 fn published_source_dir(paths: &PackagePaths) -> Result<PathBuf> {
-    only_child_dir(&paths.published_source, paths.package_name())
+    absolute_path(only_child_dir(
+        &paths.published_source,
+        paths.package_name(),
+    )?)
 }
 
 fn only_child_dir(path: &Path, package_name: &str) -> Result<PathBuf> {
@@ -232,4 +232,14 @@ fn only_child_dir(path: &Path, package_name: &str) -> Result<PathBuf> {
             ),
         )),
     }
+}
+
+fn absolute_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+
+    std::env::current_dir()
+        .map(|current_dir| current_dir.join(path))
+        .map_err(|error| ConcertoError::store("root", StoreStep::Prepare, error.to_string()))
 }
