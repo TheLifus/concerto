@@ -28,14 +28,22 @@ pub(crate) struct LockedPackage {
 
 pub(crate) const LOCKFILE_VERSION: u8 = 2;
 pub(crate) const LOCKFILE_PATH: &str = "concerto.lock";
+const LOCKFILE_TEMP_PATH: &str = "concerto.lock.tmp";
 
 pub(crate) fn write(lockfile: &Lockfile) -> Result<()> {
     let content = serde_json::to_string_pretty(lockfile).map_err(|error| {
         ConcertoError::lockfile(format!("Could not serialize lockfile: {error}"))
     })?;
 
-    std::fs::write(LOCKFILE_PATH, content)
-        .map_err(|error| ConcertoError::lockfile(format!("Could not write lockfile: {error}")))
+    std::fs::write(LOCKFILE_TEMP_PATH, content).map_err(|error| {
+        ConcertoError::lockfile(format!("Could not write temporary lockfile: {error}"))
+    })?;
+
+    std::fs::rename(LOCKFILE_TEMP_PATH, LOCKFILE_PATH).map_err(|error| {
+        let _ = std::fs::remove_file(LOCKFILE_TEMP_PATH);
+
+        ConcertoError::lockfile(format!("Could not publish lockfile: {error}"))
+    })
 }
 
 pub(crate) fn read() -> Result<Option<Lockfile>> {

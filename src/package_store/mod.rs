@@ -28,6 +28,17 @@ pub(crate) struct PackageArchive<'a> {
     pub unsafe_trust_store: bool,
 }
 
+pub(crate) enum VendorLinkChange {
+    Unchanged,
+    Created {
+        link: PathBuf,
+    },
+    Replaced {
+        link: PathBuf,
+        previous_target: PathBuf,
+    },
+}
+
 impl PackageSource {
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -84,7 +95,9 @@ pub(crate) fn prepare_source(
     })
 }
 
-pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<()> {
+pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<VendorLinkChange> {
+    let mut previous_target = None;
+
     if let Ok(metadata) = std::fs::symlink_metadata(&source.vendor_link) {
         if !metadata.file_type().is_symlink() {
             return Err(ConcertoError::store_with_hint(
@@ -98,8 +111,16 @@ pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<()> {
             ));
         }
 
-        if std::fs::read_link(&source.vendor_link).is_ok_and(|target| target == source.path) {
-            return Ok(());
+        let target = std::fs::read_link(&source.vendor_link).map_err(|error| {
+            ConcertoError::store(
+                &source.package_name,
+                StoreStep::Link,
+                format!("could not read existing vendor link: {error}"),
+            )
+        })?;
+
+        if target == source.path {
+            return Ok(VendorLinkChange::Unchanged);
         }
 
         std::fs::remove_file(&source.vendor_link).map_err(|error| {
@@ -109,6 +130,7 @@ pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<()> {
                 format!("could not remove existing vendor link: {error}"),
             )
         })?;
+        previous_target = Some(target);
     }
 
     if let Some(parent) = source.vendor_link.parent() {
@@ -121,13 +143,106 @@ pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<()> {
         })?;
     }
 
-    std::os::unix::fs::symlink(&source.path, &source.vendor_link).map_err(|error| {
-        ConcertoError::store(
+    if let Err(error) = std::os::unix::fs::symlink(&source.path, &source.vendor_link) {
+        if let Some(previous_target) = &previous_target {
+            restore_vendor_link(&source.vendor_link, previous_target)?;
+        }
+
+        return Err(ConcertoError::store(
             &source.package_name,
             StoreStep::Link,
             format!("could not link vendor package to source: {error}"),
+        ));
+    }
+
+    Ok(match previous_target {
+        Some(previous_target) => VendorLinkChange::Replaced {
+            link: source.vendor_link.clone(),
+            previous_target,
+        },
+        None => VendorLinkChange::Created {
+            link: source.vendor_link.clone(),
+        },
+    })
+}
+
+pub(crate) fn rollback_vendor_links(changes: &[VendorLinkChange]) -> Result<()> {
+    for change in changes.iter().rev() {
+        rollback_vendor_link(change)?;
+    }
+
+    Ok(())
+}
+
+fn rollback_vendor_link(change: &VendorLinkChange) -> Result<()> {
+    match change {
+        VendorLinkChange::Unchanged => Ok(()),
+        VendorLinkChange::Created { link } => remove_created_vendor_link(link),
+        VendorLinkChange::Replaced {
+            link,
+            previous_target,
+        } => {
+            remove_vendor_link(link)?;
+            restore_vendor_link(link, previous_target)
+        }
+    }
+}
+
+fn remove_created_vendor_link(link: &Path) -> Result<()> {
+    remove_vendor_link(link)?;
+    remove_empty_vendor_namespace(link);
+
+    Ok(())
+}
+
+fn restore_vendor_link(link: &Path, target: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link).map_err(|error| {
+        ConcertoError::store_with_hint(
+            "vendor",
+            StoreStep::Rollback,
+            format!("could not restore vendor link {}: {error}", link.display()),
+            "Check vendor permissions, then run install again.",
         )
     })
+}
+
+fn remove_vendor_link(link: &Path) -> Result<()> {
+    let Ok(metadata) = std::fs::symlink_metadata(link) else {
+        return Ok(());
+    };
+
+    if !metadata.file_type().is_symlink() {
+        return Err(ConcertoError::store_with_hint(
+            "vendor",
+            StoreStep::Rollback,
+            format!("vendor path is no longer a symlink: {}", link.display()),
+            "Check vendor manually before running install again.",
+        ));
+    }
+
+    std::fs::remove_file(link).map_err(|error| {
+        ConcertoError::store_with_hint(
+            "vendor",
+            StoreStep::Rollback,
+            format!("could not remove vendor link {}: {error}", link.display()),
+            "Check vendor permissions, then run install again.",
+        )
+    })
+}
+
+fn remove_empty_vendor_namespace(link: &Path) {
+    let Some(parent) = link.parent() else {
+        return;
+    };
+    let Some(grandparent) = parent.parent() else {
+        return;
+    };
+
+    if grandparent.file_name().and_then(|name| name.to_str()) != Some("vendor") {
+        return;
+    }
+
+    let _ = std::fs::remove_dir(parent);
 }
 
 fn existing_source(
@@ -313,4 +428,50 @@ fn absolute_path(path: PathBuf) -> Result<PathBuf> {
     std::env::current_dir()
         .map(|current_dir| current_dir.join(path))
         .map_err(|error| ConcertoError::store("root", StoreStep::Prepare, error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rollback_reports_when_created_vendor_link_is_no_longer_a_symlink() {
+        let project = temp_project("store-rollback-created-link-replaced");
+        let link = project.join("vendor/package");
+        std::fs::create_dir_all(&link).unwrap();
+
+        let error = rollback_vendor_links(&[VendorLinkChange::Created { link }])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Could not rollback vendor"));
+        assert!(error.contains("vendor path is no longer a symlink"));
+        assert!(error.contains("Check vendor manually before running install again."));
+    }
+
+    #[test]
+    fn rollback_keeps_non_empty_vendor_namespace() {
+        let project = temp_project("store-rollback-keeps-non-empty-namespace");
+        let namespace = project.join("vendor/acme");
+        let link = namespace.join("package");
+        std::fs::create_dir_all(&namespace).unwrap();
+        std::fs::write(namespace.join("README"), "keep").unwrap();
+
+        remove_empty_vendor_namespace(&link);
+
+        assert!(namespace.exists());
+    }
+
+    fn temp_project(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("concerto-{name}-{nanos}"));
+
+        std::fs::create_dir_all(&path).unwrap();
+
+        path
+    }
 }

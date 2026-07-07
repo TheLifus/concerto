@@ -1,10 +1,11 @@
 use super::{
-    MAX_PARALLEL_WORKERS, PackageSourcePreparation, log_integrity_check, prepare_package_source,
+    MAX_PARALLEL_WORKERS, PackageSourcePreparation, install_vendor_links, log_integrity_check,
+    prepare_package_source,
 };
 use crate::error::{ConcertoError, Result};
 use crate::install_event::{InstallEventKind, InstallReporter};
 use crate::lockfile::LockedPackage;
-use crate::package_store::{self, PackageArchive};
+use crate::package_store::{self, PackageArchive, VendorLinkChange};
 use crate::perf::PerfLogger;
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ pub(super) fn install(
     unsafe_trust_store: bool,
     perf: &PerfLogger,
     reporter: &InstallReporter,
-) -> Result<()> {
+) -> Result<Vec<VendorLinkChange>> {
     let prepare_started_at = Instant::now();
     let prepared_packages = prepare_sources(packages, unsafe_trust_store, reporter)?;
     for package in &prepared_packages {
@@ -34,11 +35,9 @@ pub(super) fn install(
         &[("packages", prepared_packages.len().to_string())],
     )?;
 
-    for package in prepared_packages {
-        install_prepared_package(package, perf, reporter)?;
-    }
-
-    Ok(())
+    install_vendor_links(&prepared_packages, |package| {
+        install_prepared_package(package, perf, reporter)
+    })
 }
 
 fn prepare_sources(
@@ -114,10 +113,10 @@ fn prepare_source(
 }
 
 fn install_prepared_package(
-    package: PreparedLockedPackage,
+    package: &PreparedLockedPackage,
     perf: &PerfLogger,
     reporter: &InstallReporter,
-) -> Result<()> {
+) -> Result<VendorLinkChange> {
     perf.log(
         package.source_event,
         package.source_duration,
@@ -125,7 +124,7 @@ fn install_prepared_package(
     )?;
 
     let link_started_at = Instant::now();
-    package_store::link_to_vendor(&package.source)?;
+    let link_change = package_store::link_to_vendor(&package.source)?;
     perf.log(
         "vendor_link",
         link_started_at.elapsed(),
@@ -133,12 +132,12 @@ fn install_prepared_package(
     )?;
 
     reporter.emit(InstallEventKind::VendorLinked {
-        package: package.name,
-        version: package.version,
+        package: package.name.clone(),
+        version: package.version.clone(),
         path: InstallReporter::path(package.source.path()),
     });
 
-    Ok(())
+    Ok(link_change)
 }
 
 fn emit_source_event(package: &PreparedLockedPackage, reporter: &InstallReporter) {

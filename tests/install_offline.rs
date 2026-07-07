@@ -434,6 +434,170 @@ fn offline_installs_transitive_requirement_and_relinks_from_lockfile() {
 }
 
 #[test]
+fn offline_resolved_install_rolls_back_created_vendor_links_on_later_failure() {
+    let project = temp_project("offline-resolved-vendor-rollback-created");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("vendor/psr/log")).unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("psr/log"));
+    assert!(error.contains("vendor path already exists and is not a symlink"));
+    assert!(!project.join("vendor/monolog/monolog").exists());
+    assert!(!project.join("vendor/monolog").exists());
+    assert!(project.join("vendor/psr/log").is_dir());
+    assert!(!project.join("concerto.lock").exists());
+}
+
+#[test]
+fn offline_lockfile_install_restores_replaced_vendor_links_on_later_failure() {
+    let project = temp_project("offline-lockfile-vendor-rollback-replaced");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let old_target = project.join("old-monolog-source");
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    std::fs::create_dir_all(&old_target).unwrap();
+    std::fs::remove_file(project.join("vendor/monolog/monolog")).unwrap();
+    std::os::unix::fs::symlink(&old_target, project.join("vendor/monolog/monolog")).unwrap();
+    std::fs::remove_file(project.join("vendor/psr/log")).unwrap();
+    std::fs::create_dir_all(project.join("vendor/psr/log")).unwrap();
+
+    let output = offline_lockfile_install(&project, "8.2.25");
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("psr/log"));
+    assert!(error.contains("vendor path already exists and is not a symlink"));
+    assert_eq!(
+        std::fs::read_link(project.join("vendor/monolog/monolog")).unwrap(),
+        old_target
+    );
+    assert!(project.join("vendor/psr/log").is_dir());
+}
+
+#[test]
+fn offline_resolved_install_rolls_back_vendor_links_when_autoload_write_fails() {
+    let project = temp_project("offline-resolved-vendor-rollback-autoload");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("vendor/autoload.php.tmp")).unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Could not write temporary autoload file"));
+    assert!(!project.join("vendor/monolog/monolog").exists());
+    assert!(!project.join("vendor/monolog").exists());
+    assert!(!project.join("vendor/psr/log").exists());
+    assert!(!project.join("vendor/psr").exists());
+    assert!(!project.join("concerto.lock").exists());
+}
+
+#[test]
+fn offline_lockfile_install_preserves_existing_autoload_when_rewrite_fails() {
+    let project = temp_project("offline-lockfile-autoload-rollback");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let old_autoload = "<?php // old autoload\n";
+    let old_loader = "<?php // old loader\n";
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    std::fs::write(project.join("vendor/autoload.php"), old_autoload).unwrap();
+    std::fs::write(project.join("vendor/concerto_autoload.php"), old_loader).unwrap();
+    std::fs::create_dir_all(project.join("vendor/autoload.php.tmp")).unwrap();
+
+    let output = offline_lockfile_install(&project, "8.2.25");
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Could not write temporary autoload file"));
+    assert_eq!(
+        std::fs::read_to_string(project.join("vendor/autoload.php")).unwrap(),
+        old_autoload
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("vendor/concerto_autoload.php")).unwrap(),
+        old_loader
+    );
+    assert!(project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_resolved_install_rolls_back_when_lockfile_write_fails() {
+    let project = temp_project("offline-resolved-lockfile-rollback");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let old_autoload = "<?php // old autoload\n";
+    let old_loader = "<?php // old loader\n";
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let old_lockfile = std::fs::read_to_string(project.join("concerto.lock")).unwrap();
+    std::fs::write(project.join("vendor/autoload.php"), old_autoload).unwrap();
+    std::fs::write(project.join("vendor/concerto_autoload.php"), old_loader).unwrap();
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("concerto.lock.tmp")).unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Could not write temporary lockfile"));
+    assert_eq!(
+        std::fs::read_to_string(project.join("concerto.lock")).unwrap(),
+        old_lockfile
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("vendor/autoload.php")).unwrap(),
+        old_autoload
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("vendor/concerto_autoload.php")).unwrap(),
+        old_loader
+    );
+    assert!(!project.join("vendor/monolog/monolog").exists());
+    assert!(!project.join("vendor/monolog").exists());
+    assert!(project.join("vendor/psr/log").exists());
+}
+
+#[test]
 fn offline_verifies_archive_integrity_when_rebuilding_store_from_lockfile() {
     let project = temp_project("offline-lockfile-verified-download");
     let metadata_dir = prepare_packagist_fixtures(&project);

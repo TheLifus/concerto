@@ -62,6 +62,7 @@ pub(crate) enum StoreStep {
     Extract,
     Publish,
     Link,
+    Rollback,
 }
 
 impl ConcertoError {
@@ -270,6 +271,7 @@ impl fmt::Display for StoreStep {
             Self::Extract => "extract",
             Self::Publish => "publish",
             Self::Link => "link",
+            Self::Rollback => "rollback",
         };
 
         formatter.write_str(step)
