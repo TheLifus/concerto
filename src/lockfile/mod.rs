@@ -1,24 +1,28 @@
-use crate::composer::RequiredPackage;
+use crate::composer::{ComposerRepository, RequiredPackage};
 use crate::error::{ConcertoError, Result};
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub(crate) struct Lockfile {
     pub lockfile_version: u8,
-    pub root_requirements_hash: String,
+    pub root_manifest_hash: String,
     pub root_requirements: Vec<RequiredPackage>,
+    #[serde(default)]
+    pub root_repositories: Vec<ComposerRepository>,
     pub packages: Vec<LockedPackage>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub(crate) struct LockedPackage {
     pub name: String,
     pub version: String,
     pub dist_url: String,
+    #[serde(default)]
+    pub dev: bool,
     pub package_requires: Vec<RequiredPackage>,
     pub platform_requires: Vec<RequiredPackage>,
 }
 
-pub(crate) const LOCKFILE_VERSION: u8 = 1;
+pub(crate) const LOCKFILE_VERSION: u8 = 2;
 pub(crate) const LOCKFILE_PATH: &str = "concerto.lock";
 
 pub(crate) fn write(lockfile: &Lockfile) -> Result<()> {
@@ -51,31 +55,46 @@ fn parse(content: &str) -> Result<Lockfile> {
         )));
     }
 
-    if lockfile.root_requirements_hash != root_requirements_hash(&lockfile.root_requirements) {
+    if lockfile.root_manifest_hash
+        != root_manifest_hash(&lockfile.root_requirements, &lockfile.root_repositories)
+    {
         return Err(ConcertoError::lockfile(
-            "Lockfile root requirements hash does not match requirements",
+            "Lockfile root manifest hash does not match root requirements and repositories",
         ));
     }
 
     Ok(lockfile)
 }
 
-pub(crate) fn matches_root_requirements(
+pub(crate) fn matches_root_manifest(
     lockfile: &Lockfile,
     root_requirements: &[RequiredPackage],
+    root_repositories: &[ComposerRepository],
 ) -> bool {
-    lockfile.root_requirements_hash == root_requirements_hash(root_requirements)
+    lockfile.root_manifest_hash == root_manifest_hash(root_requirements, root_repositories)
 }
 
-pub(crate) fn root_requirements_hash(root_requirements: &[RequiredPackage]) -> String {
+pub(crate) fn root_manifest_hash(
+    root_requirements: &[RequiredPackage],
+    root_repositories: &[ComposerRepository],
+) -> String {
     let mut requirements = root_requirements.to_vec();
-    requirements.sort_by(|left, right| left.name.cmp(&right.name));
+    requirements.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.constraint.cmp(&right.constraint))
+    });
 
     let mut hasher = blake3::Hasher::new();
 
+    hash_value(&mut hasher, "requirements");
     for requirement in requirements {
         hash_value(&mut hasher, &requirement.name);
         hash_value(&mut hasher, &requirement.constraint);
+    }
+    hash_value(&mut hasher, "repositories");
+    for repository in root_repositories {
+        hash_value(&mut hasher, &repository.url);
     }
 
     hasher.finalize().to_hex().to_string()

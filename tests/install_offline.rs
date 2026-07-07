@@ -50,8 +50,39 @@ fn prepare_packagist_fixtures(project: &Path) -> PathBuf {
     metadata_dir
 }
 
+fn write_repository_package(repository_dir: &Path, package_name: &str, metadata: &str) {
+    let path = repository_dir
+        .join("p2")
+        .join(package_name)
+        .with_extension("json");
+
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, metadata).unwrap();
+}
+
+fn write_repository_provider(repository_dir: &Path, package_name: &str, metadata: &str) {
+    let path = repository_dir
+        .join("providers")
+        .join(package_name)
+        .with_extension("json");
+
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, metadata).unwrap();
+}
+
 fn offline_install(project: &Path, metadata_dir: &Path) -> Output {
     offline_install_with_platform(project, metadata_dir, "8.2.25")
+}
+
+fn offline_install_no_dev(project: &Path, metadata_dir: &Path) -> Output {
+    concerto_command()
+        .args(["install", "--no-dev"])
+        .current_dir(project)
+        .env(PACKAGIST_FIXTURES_ENV, metadata_dir)
+        .env(PLATFORM_PHP_ENV, "8.2.25")
+        .env(PLATFORM_EXTENSIONS_ENV, "json")
+        .output()
+        .unwrap()
 }
 
 fn assert_install_summary(output: &Output, package_count: usize) {
@@ -102,6 +133,27 @@ fn offline_lockfile_install(project: &Path, php_version: &str) -> Output {
         .unwrap()
 }
 
+fn offline_lockfile_install_no_dev(project: &Path, php_version: &str) -> Output {
+    concerto_command()
+        .args(["install", "--no-dev"])
+        .current_dir(project)
+        .env(PACKAGIST_FIXTURES_ENV, project.join("missing-fixtures"))
+        .env(PLATFORM_PHP_ENV, php_version)
+        .env(PLATFORM_EXTENSIONS_ENV, "json")
+        .output()
+        .unwrap()
+}
+
+fn locked_dev(lockfile: &Value, package_name: &str) -> bool {
+    lockfile["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == package_name)
+        .and_then(|package| package["dev"].as_bool())
+        .unwrap()
+}
+
 #[test]
 fn offline_installs_direct_requirement() {
     let project = temp_project("offline-direct");
@@ -124,6 +176,103 @@ fn offline_installs_direct_requirement() {
 
     assert_eq!(locked_version(&lockfile, "psr/log"), "3.0.2");
     assert_eq!(lockfile["packages"].as_array().unwrap().len(), 1);
+    assert!(!locked_dev(&lockfile, "psr/log"));
+}
+
+#[test]
+fn offline_installs_require_dev_by_default() {
+    let project = temp_project("offline-require-dev");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"},"require-dev":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/psr/log").exists());
+    assert!(project.join("vendor/monolog/monolog").exists());
+    assert_install_summary(&output, 2);
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "psr/log"), "3.0.2");
+    assert_eq!(locked_version(&lockfile, "monolog/monolog"), "3.0.0");
+    assert!(!locked_dev(&lockfile, "psr/log"));
+    assert!(locked_dev(&lockfile, "monolog/monolog"));
+    assert!(
+        lockfile["root_requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|requirement| requirement["name"] == "monolog/monolog")
+    );
+}
+
+#[test]
+fn offline_skips_require_dev_with_no_dev() {
+    let project = temp_project("offline-no-dev");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"},"require-dev":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install_no_dev(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/psr/log").exists());
+    assert!(!project.join("vendor/monolog/monolog").exists());
+    assert_install_summary(&output, 1);
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "psr/log"), "3.0.2");
+    assert_eq!(locked_version(&lockfile, "monolog/monolog"), "3.0.0");
+    assert_eq!(lockfile["packages"].as_array().unwrap().len(), 2);
+    assert!(!locked_dev(&lockfile, "psr/log"));
+    assert!(locked_dev(&lockfile, "monolog/monolog"));
+    assert!(
+        lockfile["root_requirements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|requirement| requirement["name"] == "monolog/monolog")
+    );
+}
+
+#[test]
+fn offline_no_dev_reuses_full_lockfile_without_rewriting() {
+    let project = temp_project("offline-no-dev-lockfile");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"},"require-dev":{"monolog/monolog":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/monolog/monolog").exists());
+
+    let lockfile_before = std::fs::read_to_string(project.join("concerto.lock")).unwrap();
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_lockfile_install_no_dev(&project, "8.2.25");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Installing from lockfile"));
+    assert_install_summary(&output, 1);
+    assert!(project.join("vendor/psr/log").exists());
+    assert!(!project.join("vendor/monolog/monolog").exists());
+
+    let lockfile_after = std::fs::read_to_string(project.join("concerto.lock")).unwrap();
+
+    assert_eq!(lockfile_after, lockfile_before);
 }
 
 #[test]
@@ -312,6 +461,202 @@ fn offline_rejects_unmatched_version_constraint() {
 }
 
 #[test]
+fn offline_installs_provider_for_virtual_requirement() {
+    let project = temp_project("offline-virtual-provider");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let archive_base = format!(
+        "file://{}",
+        fixture_path("tests/fixtures/archives").display()
+    );
+    std::fs::write(
+        metadata_dir.join("providers-psr-log-implementation.json"),
+        r#"{"providers":[{"name":"acme/bad-log"},{"name":"acme/log"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        metadata_dir.join("acme-bad-log.json"),
+        format!(
+            r#"{{
+  "packages": {{
+    "acme/bad-log": [
+      {{
+        "version": "1.0.0",
+        "dist": {{ "url": "{archive_base}/psr-log-3.0.2.zip" }},
+        "require": {{ "ext-ldap": "*" }},
+        "provide": {{ "psr/log-implementation": "1.0.0" }}
+      }}
+    ]
+  }}
+}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        metadata_dir.join("acme-log.json"),
+        format!(
+            r#"{{
+  "packages": {{
+    "acme/log": [
+      {{
+        "version": "1.0.0",
+        "dist": {{ "url": "{archive_base}/psr-log-3.0.2.zip" }},
+        "provide": {{ "psr/log-implementation": "1.0.0" }}
+      }}
+    ]
+  }}
+}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log-implementation":"^1.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/acme/log").exists());
+    assert_install_summary(&output, 1);
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "acme/log"), "1.0.0");
+}
+
+#[test]
+fn offline_uses_custom_repository_before_packagist_fallback() {
+    let project = temp_project("offline-custom-repo-priority");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let repository_dir = project.join("custom-repo");
+    let archive_base = format!(
+        "file://{}",
+        fixture_path("tests/fixtures/archives").display()
+    );
+    write_repository_package(
+        &repository_dir,
+        "psr/log",
+        &format!(
+            r#"{{
+  "packages": {{
+    "psr/log": [
+      {{
+        "version": "3.1.0",
+        "dist": {{ "url": "{archive_base}/psr-log-3.0.2.zip" }}
+      }}
+    ]
+  }}
+}}"#
+        ),
+    );
+    std::fs::write(
+        project.join("composer.json"),
+        format!(
+            r#"{{
+  "repositories": [
+    {{ "type": "composer", "url": "file://{}" }}
+  ],
+  "require": {{ "psr/log": "^3.0" }}
+}}"#,
+            repository_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "psr/log"), "3.1.0");
+}
+
+#[test]
+fn offline_falls_back_to_packagist_fixtures_after_custom_repository_miss() {
+    let project = temp_project("offline-custom-repo-fallback");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let repository_dir = project.join("empty-repo");
+    std::fs::create_dir_all(&repository_dir).unwrap();
+    std::fs::write(
+        project.join("composer.json"),
+        format!(
+            r#"{{
+  "repositories": [
+    {{ "type": "composer", "url": "file://{}" }}
+  ],
+  "require": {{ "psr/log": "^3.0" }}
+}}"#,
+            repository_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "psr/log"), "3.0.2");
+}
+
+#[test]
+fn offline_uses_custom_repository_provider_metadata() {
+    let project = temp_project("offline-custom-repo-provider");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let repository_dir = project.join("provider-repo");
+    let archive_base = format!(
+        "file://{}",
+        fixture_path("tests/fixtures/archives").display()
+    );
+    write_repository_provider(
+        &repository_dir,
+        "psr/log-implementation",
+        r#"{"providers":[{"name":"acme/log"}]}"#,
+    );
+    write_repository_package(
+        &repository_dir,
+        "acme/log",
+        &format!(
+            r#"{{
+  "packages": {{
+    "acme/log": [
+      {{
+        "version": "1.0.0",
+        "dist": {{ "url": "{archive_base}/psr-log-3.0.2.zip" }},
+        "provide": {{ "psr/log-implementation": "1.0.0" }}
+      }}
+    ]
+  }}
+}}"#
+        ),
+    );
+    std::fs::write(
+        project.join("composer.json"),
+        format!(
+            r#"{{
+  "repositories": [
+    {{ "type": "composer", "url": "file://{}" }}
+  ],
+  "require": {{ "psr/log-implementation": "^1.0" }}
+}}"#,
+            repository_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let lockfile = read_lockfile(&project);
+
+    assert_eq!(locked_version(&lockfile, "acme/log"), "1.0.0");
+}
+
+#[test]
 fn offline_rejects_unmet_platform_requirement() {
     let project = temp_project("offline-platform");
     let metadata_dir = prepare_packagist_fixtures(&project);
@@ -378,6 +723,7 @@ fn offline_backtracks_when_latest_candidate_conflicts_later() {
 
     assert!(perf_log.contains("resolve_candidates"));
     assert!(perf_log.contains("resolve_solver"));
-    assert!(perf_log.contains("decisions="));
-    assert!(perf_log.contains("backtracks="));
+    assert!(perf_log.contains("versions="));
+    assert!(perf_log.contains("dependencies="));
+    assert!(perf_log.contains("provider_versions="));
 }

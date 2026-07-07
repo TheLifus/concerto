@@ -25,7 +25,7 @@ fn main() {
 
     match command {
         cli::Command::Install(options) => {
-            if let Err(error) = output::install(options.output_mode) {
+            if let Err(error) = output::install(options) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }

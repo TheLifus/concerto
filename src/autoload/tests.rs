@@ -1,13 +1,15 @@
 use super::*;
 use crate::composer::RequiredPackage;
+use crate::lockfile::LOCKFILE_VERSION;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn orders_files_like_composer_dependencies_first() {
     let lockfile = Lockfile {
-        lockfile_version: 1,
-        root_requirements_hash: "test".to_string(),
+        lockfile_version: LOCKFILE_VERSION,
+        root_manifest_hash: "test".to_string(),
         root_requirements: Vec::new(),
+        root_repositories: Vec::new(),
         packages: vec![
             package("vendor/a", &[required_package("vendor/b")]),
             package("vendor/b", &[]),
@@ -100,6 +102,7 @@ fn package(name: &str, package_requires: &[RequiredPackage]) -> LockedPackage {
         name: name.to_string(),
         version: "1.0.0".to_string(),
         dist_url: "https://example.com/package.zip".to_string(),
+        dev: false,
         package_requires: package_requires.to_vec(),
         platform_requires: Vec::new(),
     }

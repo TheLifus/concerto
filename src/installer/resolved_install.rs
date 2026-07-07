@@ -93,6 +93,8 @@ impl ResolutionObserver for SpeculativePreparer {
                 constraints: Vec::new(),
                 package_requires: Vec::new(),
                 platform_requires: Vec::new(),
+                provides: Vec::new(),
+                replaces: Vec::new(),
             };
 
             prepare_source(&name, &package)

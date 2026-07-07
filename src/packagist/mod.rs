@@ -1,5 +1,5 @@
 use crate::composer::{
-    RequiredPackage, is_package_name, package_path_parts, required_packages_from_object,
+    RequiredPackage, is_platform_requirement, package_path_parts, required_packages_from_object,
 };
 use crate::error::{ConcertoError, Result};
 use crate::platform::{self, Platform};
@@ -13,6 +13,9 @@ pub struct PackagistRelease {
     pub dist_url: String,
     pub package_requires: Vec<RequiredPackage>,
     pub platform_requires: Vec<RequiredPackage>,
+    pub conflicts: Vec<RequiredPackage>,
+    pub provides: Vec<RequiredPackage>,
+    pub replaces: Vec<RequiredPackage>,
 }
 
 struct PlatformRejection {
@@ -21,14 +24,73 @@ struct PlatformRejection {
 }
 
 pub fn package_url(package_name: &str) -> Result<String> {
+    repository_package_url("https://repo.packagist.org", package_name)
+}
+
+pub(crate) fn providers_url(package_name: &str) -> Result<String> {
+    repository_providers_url("https://packagist.org", package_name)
+}
+
+pub(crate) fn repository_package_url(repository_url: &str, package_name: &str) -> Result<String> {
     let constraints = Vec::new();
     let (vendor, package) = package_path_parts(package_name).map_err(|error| {
         ConcertoError::resolution(package_name, &constraints, error.to_string())
     })?;
 
-    Ok(format!(
-        "https://repo.packagist.org/p2/{vendor}/{package}.json"
-    ))
+    Ok(format!("{repository_url}/p2/{vendor}/{package}.json"))
+}
+
+pub(crate) fn repository_providers_url(repository_url: &str, package_name: &str) -> Result<String> {
+    if package_name.is_empty() || package_name.contains("..") {
+        return Err(ConcertoError::invalid_package_name(package_name));
+    }
+
+    Ok(format!("{repository_url}/providers/{package_name}.json"))
+}
+
+pub(crate) fn provider_names(
+    metadata_json: &str,
+    package_name: &str,
+    constraints: &[String],
+) -> Result<Vec<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(metadata_json).map_err(|error| {
+        ConcertoError::resolution(
+            package_name,
+            constraints,
+            format!("invalid Packagist provider metadata: {error}"),
+        )
+    })?;
+    let providers = parsed
+        .get("providers")
+        .and_then(|providers| providers.as_array())
+        .ok_or_else(|| {
+            ConcertoError::resolution(
+                package_name,
+                constraints,
+                "Packagist provider metadata does not contain providers",
+            )
+        })?;
+    let mut names = providers
+        .iter()
+        .map(|provider| {
+            provider
+                .get("name")
+                .and_then(|name| name.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ConcertoError::resolution(
+                        package_name,
+                        constraints,
+                        "Packagist provider entry does not contain a package name",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    names.sort();
+    names.dedup();
+
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -104,10 +166,18 @@ fn parsed_release_candidates(
 
     let mut platform_rejections = Vec::new();
     let mut candidates = Vec::new();
+    let mut inherited_links = InheritedLinks::default();
 
     for release in versions {
-        let Some(candidate) =
-            release_candidate(release, package_name, constraints, versions.len())?
+        inherited_links.update(release);
+
+        let Some(candidate) = release_candidate(
+            release,
+            &inherited_links,
+            package_name,
+            constraints,
+            versions.len(),
+        )?
         else {
             continue;
         };
@@ -125,6 +195,33 @@ fn parsed_release_candidates(
     }
 
     Ok((candidates, platform_rejections))
+}
+
+#[derive(Default)]
+struct InheritedLinks {
+    require: Option<serde_json::Value>,
+    conflict: Option<serde_json::Value>,
+    provide: Option<serde_json::Value>,
+    replace: Option<serde_json::Value>,
+}
+
+impl InheritedLinks {
+    fn update(&mut self, release: &serde_json::Value) {
+        update_inherited_link(&mut self.require, release, "require");
+        update_inherited_link(&mut self.conflict, release, "conflict");
+        update_inherited_link(&mut self.provide, release, "provide");
+        update_inherited_link(&mut self.replace, release, "replace");
+    }
+}
+
+fn update_inherited_link(
+    inherited: &mut Option<serde_json::Value>,
+    release: &serde_json::Value,
+    section: &str,
+) {
+    if let Some(value) = release.get(section) {
+        *inherited = Some(value.clone());
+    }
 }
 
 impl PackagistRelease {
@@ -161,6 +258,7 @@ fn version_matches_constraints(
 
 fn release_candidate(
     release: &serde_json::Value,
+    inherited_links: &InheritedLinks,
     package_name: &str,
     constraints: &[String],
     version_count: usize,
@@ -189,7 +287,25 @@ fn release_candidate(
     };
 
     let (package_requires, platform_requires) =
-        release_requirements(release, package_name, constraints)?;
+        release_requirements(inherited_links.require.as_ref(), package_name, constraints)?;
+    let conflicts = release_link_section(
+        inherited_links.conflict.as_ref(),
+        "conflict",
+        package_name,
+        constraints,
+    )?;
+    let provides = release_link_section(
+        inherited_links.provide.as_ref(),
+        "provide",
+        package_name,
+        constraints,
+    )?;
+    let replaces = release_link_section(
+        inherited_links.replace.as_ref(),
+        "replace",
+        package_name,
+        constraints,
+    )?;
 
     Ok(Some(PackagistRelease {
         version_count,
@@ -197,15 +313,18 @@ fn release_candidate(
         dist_url: dist_url.to_string(),
         package_requires,
         platform_requires,
+        conflicts,
+        provides,
+        replaces,
     }))
 }
 
 fn release_requirements(
-    release: &serde_json::Value,
+    require: Option<&serde_json::Value>,
     package_name: &str,
     constraints: &[String],
 ) -> Result<(Vec<RequiredPackage>, Vec<RequiredPackage>)> {
-    let Some(require) = release.get("require") else {
+    let Some(require) = require else {
         return Ok((Vec::new(), Vec::new()));
     };
 
@@ -224,11 +343,37 @@ fn release_requirements(
     let requirements = required_packages_from_object(require)
         .map_err(|error| ConcertoError::resolution(package_name, constraints, error.to_string()))?;
 
-    let (package_requires, platform_requires) = requirements
+    let (platform_requires, package_requires) = requirements
         .into_iter()
-        .partition(|requirement| is_package_name(&requirement.name));
+        .partition(|requirement| is_platform_requirement(&requirement.name));
 
     Ok((package_requires, platform_requires))
+}
+
+fn release_link_section(
+    value: Option<&serde_json::Value>,
+    section: &str,
+    package_name: &str,
+    constraints: &[String],
+) -> Result<Vec<RequiredPackage>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+
+    if value.as_str().is_some_and(|value| value == "__unset") {
+        return Ok(Vec::new());
+    }
+
+    let links = value.as_object().ok_or_else(|| {
+        ConcertoError::resolution(
+            package_name,
+            constraints,
+            format!("Packagist release {section} must be an object"),
+        )
+    })?;
+
+    required_packages_from_object(links)
+        .map_err(|error| ConcertoError::resolution(package_name, constraints, error.to_string()))
 }
 
 fn no_matching_version_error(

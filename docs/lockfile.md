@@ -5,7 +5,7 @@ to inspect, diff, and evolve without a custom parser.
 
 ## Current version
 
-Concerto currently writes `lockfile_version: 1`.
+Concerto currently writes `lockfile_version: 2`.
 
 When reading a lockfile, Concerto rejects unsupported versions instead of
 guessing how to interpret them. This keeps future format changes explicit.
@@ -14,9 +14,10 @@ guessing how to interpret them. This keeps future format changes explicit.
 
 ```json
 {
-  "lockfile_version": 1,
-  "root_requirements_hash": "...",
+  "lockfile_version": 2,
+  "root_manifest_hash": "...",
   "root_requirements": [],
+  "root_repositories": [],
   "packages": []
 }
 ```
@@ -24,26 +25,34 @@ guessing how to interpret them. This keeps future format changes explicit.
 | Field | Purpose |
 | --- | --- |
 | `lockfile_version` | Schema version supported by Concerto |
-| `root_requirements_hash` | Hash used to detect stale root requirements |
+| `root_manifest_hash` | Hash used to detect stale root requirements or repositories |
 | `root_requirements` | Sorted `composer.json` package requirements |
+| `root_repositories` | Root Composer repositories in priority order |
 | `packages` | Sorted resolved package entries |
 
-## Root requirements hash
+## Root manifest hash
 
-`root_requirements_hash` is computed from the sorted root requirements.
+`root_manifest_hash` is computed from the sorted root requirements and root
+Composer repositories.
 
 For each root requirement, Concerto hashes:
 
 - package name
 - constraint
 
+For each root repository, Concerto hashes:
+
+- repository URL
+
+Repository order is preserved because Composer repository priority is ordered.
+
 The hash is used as a cheap stale-lockfile check. If `composer.json` changes,
-the current root requirements hash no longer matches the lockfile and Concerto
+the current root manifest hash no longer matches the lockfile and Concerto
 resolves dependencies again.
 
-Concerto also validates that `root_requirements_hash` matches the
-`root_requirements` stored in the lockfile. A lockfile with mismatched data is
-rejected.
+Concerto also validates that `root_manifest_hash` matches the
+`root_requirements` and `root_repositories` stored in the lockfile. A lockfile
+with mismatched data is rejected.
 
 ## Package entries
 
@@ -54,6 +63,7 @@ Each package entry stores the data needed to reinstall from the lockfile:
   "name": "psr/log",
   "version": "3.0.2",
   "dist_url": "https://example.com/archive.zip",
+  "dev": false,
   "package_requires": [],
   "platform_requires": []
 }
@@ -64,6 +74,7 @@ Each package entry stores the data needed to reinstall from the lockfile:
 | `name` | Composer package name |
 | `version` | Resolved package version |
 | `dist_url` | Archive URL used by the package store |
+| `dev` | Whether the package belongs only to the `require-dev` graph |
 | `package_requires` | Package dependencies declared by the release |
 | `platform_requires` | Platform requirements such as `php` or `ext-*` |
 
@@ -75,7 +86,7 @@ resolution returns the same result.
 
 ## Platform requirements
 
-Version 1 stores platform requirements on each locked package.
+Version 2 stores platform requirements on each locked package.
 
 Concerto validates supported platform requirements before installing from a
 lockfile:
