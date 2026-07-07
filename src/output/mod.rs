@@ -42,7 +42,7 @@ pub(crate) fn install(options: InstallOptions) -> Result<()> {
     let reporter = InstallReporter::new(event_sender);
 
     std::thread::spawn(move || {
-        let result = installer::install(reporter, options.include_dev);
+        let result = installer::install(reporter, options.include_dev, options.unsafe_trust_store);
         let _ = result_sender.send(result);
     });
 

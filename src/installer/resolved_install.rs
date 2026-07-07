@@ -1,11 +1,14 @@
-use super::{MAX_PARALLEL_WORKERS, PackageSourcePreparation, prepare_package_source};
+use super::{
+    MAX_PARALLEL_WORKERS, PackageIntegrities, PackageSourcePreparation, log_integrity_check,
+    prepare_package_source,
+};
 use crate::error::{ConcertoError, Result};
 use crate::install_event::{InstallEventKind, InstallReporter};
-use crate::package_store;
+use crate::package_store::{self, PackageArchive};
 use crate::packagist::PackagistRelease;
 use crate::perf::PerfLogger;
 use crate::resolver::{ResolutionObserver, ResolvedPackageEntry, ResolvedPackages};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -19,6 +22,7 @@ struct PreparedPackage {
 
 pub(super) struct SpeculativePreparer {
     handles: HashMap<PackageKey, JoinHandle<Result<PreparedPackage>>>,
+    unsafe_trust_store: bool,
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -29,12 +33,20 @@ struct PackageKey {
 
 pub(super) fn install(
     resolved_packages: &ResolvedPackages,
+    active_names: &HashSet<String>,
     perf: &PerfLogger,
     reporter: &InstallReporter,
     speculative_preparer: Option<SpeculativePreparer>,
-) -> Result<()> {
+) -> Result<PackageIntegrities> {
     let prepare_started_at = Instant::now();
     let prepared_packages = prepare_sources(resolved_packages, reporter, speculative_preparer)?;
+    let integrities = prepared_packages
+        .iter()
+        .map(|package| (package.name.clone(), package.source.integrity().to_string()))
+        .collect::<PackageIntegrities>();
+    for package in &prepared_packages {
+        log_integrity_check(package.source.integrity_check(), &package.name, perf)?;
+    }
 
     perf.log(
         "sources_prepare",
@@ -43,16 +55,19 @@ pub(super) fn install(
     )?;
 
     for package in prepared_packages {
-        install_prepared_package(package, perf, reporter)?;
+        if active_names.contains(&package.name) {
+            install_prepared_package(package, perf, reporter)?;
+        }
     }
 
-    Ok(())
+    Ok(integrities)
 }
 
 impl SpeculativePreparer {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(unsafe_trust_store: bool) -> Self {
         Self {
             handles: HashMap::new(),
+            unsafe_trust_store,
         }
     }
 
@@ -86,10 +101,13 @@ impl ResolutionObserver for SpeculativePreparer {
         let name = package_name.to_string();
         let version = release.version.clone();
         let dist_url = release.dist_url.clone();
+        let dist_shasum = release.dist_shasum.clone();
+        let unsafe_trust_store = self.unsafe_trust_store;
         let handle = std::thread::spawn(move || {
             let package = ResolvedPackageEntry {
                 version,
                 dist_url,
+                dist_shasum,
                 constraints: Vec::new(),
                 package_requires: Vec::new(),
                 platform_requires: Vec::new(),
@@ -97,7 +115,7 @@ impl ResolutionObserver for SpeculativePreparer {
                 replaces: Vec::new(),
             };
 
-            prepare_source(&name, &package)
+            prepare_source(&name, &package, unsafe_trust_store)
         });
 
         self.handles.insert(key, handle);
@@ -152,6 +170,9 @@ fn prepare_sources(
     reporter: &InstallReporter,
     mut speculative_preparer: Option<SpeculativePreparer>,
 ) -> Result<Vec<PreparedPackage>> {
+    let unsafe_trust_store = speculative_preparer
+        .as_ref()
+        .is_some_and(|preparer| preparer.unsafe_trust_store);
     let mut packages = resolved_packages.iter().collect::<Vec<_>>();
 
     packages.sort_by(|left, right| left.0.cmp(right.0));
@@ -174,7 +195,7 @@ fn prepare_sources(
     }
 
     for batch in missing.chunks(MAX_PARALLEL_WORKERS) {
-        let mut batch = prepare_source_batch(batch)?;
+        let mut batch = prepare_source_batch(batch, unsafe_trust_store)?;
         for package in &batch {
             emit_source_event(package, reporter);
         }
@@ -192,11 +213,14 @@ fn join_prepared_package(handle: JoinHandle<Result<PreparedPackage>>) -> Result<
 
 fn prepare_source_batch(
     packages: &[(&String, &ResolvedPackageEntry)],
+    unsafe_trust_store: bool,
 ) -> Result<Vec<PreparedPackage>> {
     std::thread::scope(|scope| {
         let handles = packages
             .iter()
-            .map(|&(name, package)| scope.spawn(move || prepare_source(name, package)))
+            .map(|&(name, package)| {
+                scope.spawn(move || prepare_source(name, package, unsafe_trust_store))
+            })
             .collect::<Vec<_>>();
 
         let mut prepared = Vec::with_capacity(handles.len());
@@ -212,12 +236,25 @@ fn prepare_source_batch(
     })
 }
 
-fn prepare_source(name: &str, package: &ResolvedPackageEntry) -> Result<PreparedPackage> {
+fn prepare_source(
+    name: &str,
+    package: &ResolvedPackageEntry,
+    unsafe_trust_store: bool,
+) -> Result<PreparedPackage> {
     let PackageSourcePreparation {
         source,
         duration,
         event,
-    } = prepare_package_source(name, &package.version, &package.dist_url)?;
+    } = prepare_package_source(
+        name,
+        PackageArchive {
+            version: &package.version,
+            dist_url: &package.dist_url,
+            expected_integrity: None,
+            expected_shasum: package.dist_shasum.as_deref(),
+            unsafe_trust_store,
+        },
+    )?;
 
     Ok(PreparedPackage {
         name: name.to_string(),

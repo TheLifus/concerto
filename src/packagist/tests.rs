@@ -72,10 +72,11 @@ fn reads_first_release_candidate() {
         "packages": {
             "monolog/monolog": [
                 {
-                    "version": "3.9.0",
-                    "dist": {
-                        "url": "https://api.github.com/repos/Seldaek/monolog/zipball/abc123"
-                    }
+                "version": "3.9.0",
+                "dist": {
+                    "url": "https://api.github.com/repos/Seldaek/monolog/zipball/abc123",
+                    "shasum": "abc123"
+                }
                 },
                 {
                     "version": "3.8.1",
@@ -103,6 +104,7 @@ fn reads_first_release_candidate() {
         release.dist_url,
         "https://api.github.com/repos/Seldaek/monolog/zipball/abc123"
     );
+    assert_eq!(release.dist_shasum, Some("abc123".to_string()));
 }
 
 #[test]

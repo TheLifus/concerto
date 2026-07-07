@@ -9,7 +9,7 @@ fn parses_install_command() {
     let command = parse(&["install"]);
 
     assert!(
-        matches!(command, Command::Install(options) if options.output_mode == OutputMode::Auto && options.include_dev)
+        matches!(command, Command::Install(options) if options.output_mode == OutputMode::Auto && options.include_dev && !options.unsafe_trust_store)
     );
 }
 
@@ -44,6 +44,15 @@ fn parses_install_without_dev_packages() {
 
     assert!(
         matches!(command, Command::Install(options) if options.output_mode == OutputMode::Auto && !options.include_dev)
+    );
+}
+
+#[test]
+fn parses_install_with_unsafe_trusted_store() {
+    let command = parse(&["install", "--unsafe-trust-store"]);
+
+    assert!(
+        matches!(command, Command::Install(options) if options.output_mode == OutputMode::Auto && options.unsafe_trust_store)
     );
 }
 

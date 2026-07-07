@@ -133,6 +133,34 @@ fn offline_lockfile_install(project: &Path, php_version: &str) -> Output {
         .unwrap()
 }
 
+fn offline_lockfile_install_unsafe_trust_store(project: &Path, php_version: &str) -> Output {
+    concerto_command()
+        .args(["install", "--unsafe-trust-store"])
+        .current_dir(project)
+        .env(PACKAGIST_FIXTURES_ENV, project.join("missing-fixtures"))
+        .env(PLATFORM_PHP_ENV, php_version)
+        .env(PLATFORM_EXTENSIONS_ENV, "json")
+        .output()
+        .unwrap()
+}
+
+fn offline_debug_lockfile_install(project: &Path, unsafe_trust_store: bool) -> Output {
+    let mut command = concerto_command();
+    command.arg("install");
+    if unsafe_trust_store {
+        command.arg("--unsafe-trust-store");
+    }
+
+    command
+        .current_dir(project)
+        .env(PACKAGIST_FIXTURES_ENV, project.join("missing-fixtures"))
+        .env(PLATFORM_PHP_ENV, "8.2.25")
+        .env(PLATFORM_EXTENSIONS_ENV, "json")
+        .env("CONCERTO_DEBUG_PERF", "1")
+        .output()
+        .unwrap()
+}
+
 fn offline_lockfile_install_no_dev(project: &Path, php_version: &str) -> Output {
     concerto_command()
         .args(["install", "--no-dev"])
@@ -152,6 +180,37 @@ fn locked_dev(lockfile: &Value, package_name: &str) -> bool {
         .find(|package| package["name"] == package_name)
         .and_then(|package| package["dev"].as_bool())
         .unwrap()
+}
+
+fn locked_integrity(lockfile: &Value, package_name: &str) -> String {
+    lockfile["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == package_name)
+        .and_then(|package| package["dist_integrity"].as_str())
+        .unwrap()
+        .to_string()
+}
+
+fn locked_shasum(lockfile: &Value, package_name: &str) -> Option<String> {
+    lockfile["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == package_name)
+        .and_then(|package| package["dist_shasum"].as_str())
+        .map(str::to_string)
+}
+
+fn integrity_store_key(integrity: &str) -> String {
+    integrity.replace(':', "-")
+}
+
+fn fixture_archive_integrity(path: &str) -> String {
+    let content = std::fs::read(fixture_path(path)).unwrap();
+
+    format!("blake3:{}", blake3::hash(&content).to_hex())
 }
 
 #[test]
@@ -177,6 +236,65 @@ fn offline_installs_direct_requirement() {
     assert_eq!(locked_version(&lockfile, "psr/log"), "3.0.2");
     assert_eq!(lockfile["packages"].as_array().unwrap().len(), 1);
     assert!(!locked_dev(&lockfile, "psr/log"));
+    assert!(locked_integrity(&lockfile, "psr/log").starts_with("blake3:"));
+    assert_eq!(
+        locked_shasum(&lockfile, "psr/log"),
+        Some("d1b237d28598c3eecb03447d38b3bc30b4baac44".to_string())
+    );
+}
+
+#[test]
+fn offline_rejects_packagist_shasum_mismatch_before_extracting() {
+    let project = temp_project("offline-shasum-mismatch");
+    let repository_dir = project.join("repo");
+    let archive_base = format!(
+        "file://{}",
+        fixture_path("tests/fixtures/archives").display()
+    );
+    write_repository_package(
+        &repository_dir,
+        "psr/log",
+        &format!(
+            r#"{{
+  "packages": {{
+    "psr/log": [
+      {{
+        "version": "3.0.2",
+        "dist": {{
+          "url": "{archive_base}/psr-log-3.0.2.zip",
+          "shasum": "0000000000000000000000000000000000000000"
+        }}
+      }}
+    ]
+  }}
+}}"#
+        ),
+    );
+    std::fs::write(
+        project.join("composer.json"),
+        format!(
+            r#"{{
+  "repositories": [{{"type":"composer","url":"file://{}"}}],
+  "require": {{"psr/log":"^3.0"}}
+}}"#,
+            repository_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &project.join("missing-fixtures"));
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("psr/log"));
+    assert!(error.contains("archive shasum mismatch"));
+    assert!(!project.join("concerto.lock").exists());
+    assert!(!project.join("vendor/psr/log").exists());
+    assert!(
+        !project
+            .join(".concerto/store/psr/log/3.0.2/package.zip.tmp")
+            .exists()
+    );
 }
 
 #[test]
@@ -202,6 +320,8 @@ fn offline_installs_require_dev_by_default() {
     assert_eq!(locked_version(&lockfile, "monolog/monolog"), "3.0.0");
     assert!(!locked_dev(&lockfile, "psr/log"));
     assert!(locked_dev(&lockfile, "monolog/monolog"));
+    assert!(locked_integrity(&lockfile, "psr/log").starts_with("blake3:"));
+    assert!(locked_integrity(&lockfile, "monolog/monolog").starts_with("blake3:"));
     assert!(
         lockfile["root_requirements"]
             .as_array()
@@ -235,6 +355,8 @@ fn offline_skips_require_dev_with_no_dev() {
     assert_eq!(lockfile["packages"].as_array().unwrap().len(), 2);
     assert!(!locked_dev(&lockfile, "psr/log"));
     assert!(locked_dev(&lockfile, "monolog/monolog"));
+    assert!(locked_integrity(&lockfile, "psr/log").starts_with("blake3:"));
+    assert!(locked_integrity(&lockfile, "monolog/monolog").starts_with("blake3:"));
     assert!(
         lockfile["root_requirements"]
             .as_array()
@@ -309,6 +431,350 @@ fn offline_installs_transitive_requirement_and_relinks_from_lockfile() {
     assert_install_summary(&output, 2);
     assert!(project.join("vendor/monolog/monolog").exists());
     assert!(project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_verifies_archive_integrity_when_rebuilding_store_from_lockfile() {
+    let project = temp_project("offline-lockfile-verified-download");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let lockfile = read_lockfile(&project);
+    let store_key = integrity_store_key(&locked_integrity(&lockfile, "psr/log"));
+
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+    std::fs::remove_dir_all(project.join(".concerto/store")).unwrap();
+
+    let output = offline_lockfile_install(&project, "8.2.25");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/psr/log").exists());
+    assert!(
+        project
+            .join(format!(
+                ".concerto/store/psr/log/3.0.2/{store_key}/integrity"
+            ))
+            .exists()
+    );
+}
+
+#[test]
+fn offline_rejects_archive_integrity_mismatch_before_extracting() {
+    let project = temp_project("offline-lockfile-integrity-mismatch");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let mismatch_archive = format!(
+        "file://{}",
+        fixture_path("tests/fixtures/archives/monolog-monolog-3.0.0.zip").display()
+    );
+    let mut lockfile = read_lockfile(&project);
+    let store_key = integrity_store_key(&locked_integrity(&lockfile, "psr/log"));
+    lockfile["packages"][0]["dist_url"] = Value::String(mismatch_archive);
+    write_lockfile(&project, &lockfile);
+
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+    std::fs::remove_dir_all(project.join(format!(".concerto/store/psr/log/3.0.2/{store_key}")))
+        .unwrap();
+
+    let output = offline_lockfile_install(&project, "8.2.25");
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("psr/log"));
+    assert!(error.contains("archive integrity mismatch"));
+    assert!(error.contains("expected blake3:"));
+    assert!(error.contains("observed blake3:"));
+    assert!(
+        !project
+            .join(format!(".concerto/store/psr/log/3.0.2/{store_key}/source"))
+            .exists()
+    );
+    assert!(
+        !project
+            .join(format!(
+                ".concerto/store/psr/log/3.0.2/{store_key}/source.tmp"
+            ))
+            .exists()
+    );
+    assert!(
+        !project
+            .join(".concerto/store/psr/log/3.0.2/package.zip.tmp")
+            .exists()
+    );
+    assert!(!project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_does_not_publish_source_when_integrity_marker_write_fails() {
+    let project = temp_project("offline-integrity-marker-write-fails");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    let integrity = fixture_archive_integrity("tests/fixtures/archives/psr-log-3.0.2.zip");
+    let store_key = integrity_store_key(&integrity);
+    let store_path = project.join(format!(".concerto/store/psr/log/3.0.2/{store_key}"));
+
+    std::fs::create_dir_all(store_path.join("integrity")).unwrap();
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("could not write archive integrity marker"));
+    assert!(!store_path.join("source").exists());
+    assert!(!project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_rejects_lockfile_package_without_archive_integrity() {
+    let project = temp_project("offline-lockfile-missing-integrity");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let mut lockfile = read_lockfile(&project);
+    lockfile["packages"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("dist_integrity");
+    write_lockfile(&project, &lockfile);
+
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_lockfile_install(&project, "8.2.25");
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Missing archive integrity for psr/log"));
+    assert!(!project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_rejects_tampered_persisted_archive_on_reuse() {
+    let project = temp_project("offline-store-zip-tamper");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let lockfile = read_lockfile(&project);
+    let store_key = integrity_store_key(&locked_integrity(&lockfile, "psr/log"));
+    std::fs::copy(
+        fixture_path("tests/fixtures/archives/monolog-monolog-3.0.0.zip"),
+        project.join(format!(
+            ".concerto/store/psr/log/3.0.2/{store_key}/package.zip"
+        )),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_lockfile_install(&project, "8.2.25");
+    let error = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(error.contains("psr/log"));
+    assert!(error.contains("archive integrity mismatch"));
+    assert!(!project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_unsafe_trust_store_relinks_without_rehashing_archive() {
+    let project = temp_project("offline-store-trust");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let lockfile = read_lockfile(&project);
+    let store_key = integrity_store_key(&locked_integrity(&lockfile, "psr/log"));
+    std::fs::copy(
+        fixture_path("tests/fixtures/archives/monolog-monolog-3.0.0.zip"),
+        project.join(format!(
+            ".concerto/store/psr/log/3.0.2/{store_key}/package.zip"
+        )),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_lockfile_install_unsafe_trust_store(&project, "8.2.25");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(project.join("vendor/psr/log").exists());
+}
+
+#[test]
+fn offline_logs_archive_integrity_phases() {
+    let project = temp_project("offline-integrity-perf");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_debug_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_debug_lockfile_install(&project, false);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_debug_lockfile_install(&project, true);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let perf_log = std::fs::read_to_string(project.join(".concerto/logs/perf.log")).unwrap();
+
+    assert!(perf_log.contains("archive_hash_download"));
+    assert!(perf_log.contains("archive_hash_reuse"));
+    assert!(perf_log.contains("archive_trust_reuse"));
+    assert!(perf_log.contains("sha1=true"));
+    assert!(perf_log.contains("sha1=false"));
+    assert!(perf_log.contains("platform_current"));
+    assert!(perf_log.contains("mode=php"));
+}
+
+#[test]
+fn offline_lockfile_with_extension_requirement_uses_full_platform_detection() {
+    let project = temp_project("offline-lockfile-platform-full");
+    let repository_dir = project.join("repo");
+    let archive_base = format!(
+        "file://{}",
+        fixture_path("tests/fixtures/archives").display()
+    );
+    write_repository_package(
+        &repository_dir,
+        "acme/ext-lock",
+        &format!(
+            r#"{{
+  "packages": {{
+    "acme/ext-lock": [
+      {{
+        "version": "1.0.0",
+        "dist": {{"url": "{archive_base}/psr-log-3.0.2.zip"}},
+        "require": {{"ext-json": "*"}}
+      }}
+    ]
+  }}
+}}"#
+        ),
+    );
+    std::fs::write(
+        project.join("composer.json"),
+        format!(
+            r#"{{
+  "repositories": [{{"type":"composer","url":"file://{}"}}],
+  "require": {{"acme/ext-lock":"^1.0"}}
+}}"#,
+            repository_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &project.join("missing-fixtures"));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_debug_lockfile_install(&project, false);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let perf_log = std::fs::read_to_string(project.join(".concerto/logs/perf.log")).unwrap();
+
+    assert!(perf_log.contains("platform_current"));
+    assert!(perf_log.contains("mode=full"));
+}
+
+#[test]
+fn offline_stores_same_package_version_by_archive_integrity() {
+    let project = temp_project("offline-content-addressed-store");
+    let metadata_dir = prepare_packagist_fixtures(&project);
+    std::fs::write(
+        project.join("composer.json"),
+        r#"{"require":{"psr/log":"^3.0"}}"#,
+    )
+    .unwrap();
+
+    let output = offline_install(&project, &metadata_dir);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let mut lockfile = read_lockfile(&project);
+    let original_key = integrity_store_key(&locked_integrity(&lockfile, "psr/log"));
+    let alternate_integrity =
+        fixture_archive_integrity("tests/fixtures/archives/monolog-monolog-3.0.0.zip");
+    let alternate_key = integrity_store_key(&alternate_integrity);
+    lockfile["packages"][0]["dist_url"] = Value::String(format!(
+        "file://{}",
+        fixture_path("tests/fixtures/archives/monolog-monolog-3.0.0.zip").display()
+    ));
+    lockfile["packages"][0]["dist_integrity"] = Value::String(alternate_integrity);
+    lockfile["packages"][0]["dist_shasum"] =
+        Value::String("ee258ba725ddd60cd74921ebd8e3e21ff021bf20".to_string());
+    write_lockfile(&project, &lockfile);
+
+    std::fs::remove_dir_all(project.join("vendor")).unwrap();
+
+    let output = offline_lockfile_install(&project, "8.2.25");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_ne!(original_key, alternate_key);
+    assert!(
+        project
+            .join(format!(
+                ".concerto/store/psr/log/3.0.2/{original_key}/source"
+            ))
+            .exists()
+    );
+    assert!(
+        project
+            .join(format!(
+                ".concerto/store/psr/log/3.0.2/{alternate_key}/source"
+            ))
+            .exists()
+    );
 }
 
 #[test]
@@ -400,11 +866,15 @@ fn offline_reports_missing_lockfile_source() {
     assert!(output.status.success(), "{}", stderr(&output));
 
     let mut lockfile = read_lockfile(&project);
+    let store_key = integrity_store_key(&locked_integrity(&lockfile, "psr/log"));
     lockfile["packages"][0]["dist_url"] = Value::String("file:///missing/package.zip".to_string());
     write_lockfile(&project, &lockfile);
 
     std::fs::remove_dir_all(project.join("vendor")).unwrap();
-    std::fs::remove_dir_all(project.join(".concerto/store/psr/log/3.0.2/source")).unwrap();
+    std::fs::remove_dir_all(
+        project.join(format!(".concerto/store/psr/log/3.0.2/{store_key}/source")),
+    )
+    .unwrap();
 
     let output = offline_lockfile_install(&project, "8.2.25");
     let error = stderr(&output);

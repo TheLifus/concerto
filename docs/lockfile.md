@@ -63,6 +63,8 @@ Each package entry stores the data needed to reinstall from the lockfile:
   "name": "psr/log",
   "version": "3.0.2",
   "dist_url": "https://example.com/archive.zip",
+  "dist_integrity": "blake3:...",
+  "dist_shasum": "d1b237d28598c3eecb03447d38b3bc30b4baac44",
   "dev": false,
   "package_requires": [],
   "platform_requires": []
@@ -74,6 +76,8 @@ Each package entry stores the data needed to reinstall from the lockfile:
 | `name` | Composer package name |
 | `version` | Resolved package version |
 | `dist_url` | Archive URL used by the package store |
+| `dist_integrity` | BLAKE3 archive hash verified before extraction or store reuse |
+| `dist_shasum` | Optional Packagist SHA-1 `dist.shasum`, verified when present |
 | `dev` | Whether the package belongs only to the `require-dev` graph |
 | `package_requires` | Package dependencies declared by the release |
 | `platform_requires` | Platform requirements such as `php` or `ext-*` |

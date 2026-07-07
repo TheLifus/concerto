@@ -11,6 +11,7 @@ pub struct PackagistRelease {
     pub version_count: usize,
     pub version: String,
     pub dist_url: String,
+    pub dist_shasum: Option<String>,
     pub package_requires: Vec<RequiredPackage>,
     pub platform_requires: Vec<RequiredPackage>,
     pub conflicts: Vec<RequiredPackage>,
@@ -285,6 +286,12 @@ fn release_candidate(
     else {
         return Ok(None);
     };
+    let dist_shasum = release
+        .get("dist")
+        .and_then(|dist| dist.get("shasum"))
+        .and_then(|shasum| shasum.as_str())
+        .filter(|shasum| !shasum.is_empty())
+        .map(str::to_string);
 
     let (package_requires, platform_requires) =
         release_requirements(inherited_links.require.as_ref(), package_name, constraints)?;
@@ -311,6 +318,7 @@ fn release_candidate(
         version_count,
         version: version.to_string(),
         dist_url: dist_url.to_string(),
+        dist_shasum,
         package_requires,
         platform_requires,
         conflicts,

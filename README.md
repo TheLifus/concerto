@@ -45,7 +45,7 @@ Example `composer.json`:
 Concerto writes:
 
 ```text
-.concerto/store/      reusable package sources
+.concerto/store/      reusable package sources keyed by package, version, and archive integrity
 vendor/               symlinks to stored package sources
 vendor/autoload.php   generated autoload entrypoint
 concerto.lock         resolved package graph
@@ -95,11 +95,20 @@ matches `concerto.lock`, Concerto does not resolve dependencies again. It
 validates platform requirements, reuses the package store, relinks `vendor/`,
 and regenerates autoload files.
 
+Detected PHP platform data is cached in `.concerto/cache/platform-php.json`.
+Concerto keeps separate cache entries for PHP-version-only checks and full
+extension metadata, keyed by the resolved PHP binary path and file metadata.
+
 The lockfile format is documented in [docs/lockfile.md](docs/lockfile.md).
 
 `require-dev` is installed by default, matching Composer. Use `install --no-dev`
 to install only production requirements from the complete lockfile without
 rewriting it.
+
+Use `install --unsafe-trust-store` to relink from an existing store without
+verifying stored archives. This can help when archive hashing dominates relink
+time, but it skips archive tamper detection and assumes `.concerto/store` is
+already trusted.
 
 ## Autoload
 
@@ -143,13 +152,21 @@ scripts/bench-composer.sh
 The script runs Composer and Concerto in Docker so PHP and Composer versions are
 stable across machines.
 
+For relink tuning, prefer the local Concerto-only benchmark. It avoids Docker
+run overhead and reports median/p95 timings plus perf-event breakdowns:
+
+```bash
+scripts/bench-concerto.sh
+```
+
 Example output:
 
 ```text
 Average over 6 cases (11 packages average):
-  Cold install: Concerto is 1.6x faster than Composer (1048ms vs 1651ms).
-  Lock install: Concerto is 2.9x faster than Composer warm (225ms vs 657ms).
-  Vendor relink: Concerto averages 231ms.
+  Cold install: Concerto is 1.5x faster than Composer (1234ms vs 1819ms).
+  Lock install: Concerto is 2.8x faster than Composer warm (302ms vs 833ms).
+  Vendor relink: Concerto averages 272ms.
+  Unsafe trusted relink: Concerto averages 297ms.
 ```
 
 Read the benchmark as a direction, not a contract. Concerto currently does less
@@ -168,9 +185,11 @@ Logs are appended to:
 .concerto/logs/perf.log
 ```
 
-Useful events include `resolve_candidates`, `resolve_providers`, `resolve_solver`, `resolve_package`, `sources_prepare`,
-`source_download_extract`, `source_reuse`, `vendor_link`, `autoload_write`,
-`platform_current`, `lockfile_install`, and `lockfile_write`.
+Useful events include `resolve_candidates`, `resolve_providers`, `resolve_solver`,
+`resolve_package`, `sources_prepare`, `source_download_extract`, `source_reuse`,
+`archive_hash_download`, `archive_hash_reuse`, `archive_trust_reuse`,
+`vendor_link`, `autoload_write`, `platform_current`, `lockfile_install`, and
+`lockfile_write`.
 
 ## Project layout
 

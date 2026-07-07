@@ -1,27 +1,31 @@
-use crate::composer::package_path_parts;
+mod archive;
+mod paths;
+
 use crate::error::{ConcertoError, Result, StoreStep};
 use crate::http::download_to_file;
+pub(crate) use archive::{IntegrityCheck, IntegrityCheckKind};
+use archive::{
+    verify_downloaded_archive, verify_stored_integrity, verify_unsafe_trusted_store_marker,
+    write_integrity,
+};
+use paths::{PackageBasePaths, PackagePaths, package_base_paths, package_paths};
 use std::path::{Path, PathBuf};
-
-struct PackagePaths {
-    package_name: String,
-    vendor_link: PathBuf,
-    zip: PathBuf,
-    store: PathBuf,
-    published_source: PathBuf,
-    staged_source: PathBuf,
-}
 
 pub(crate) struct PackageSource {
     package_name: String,
     path: PathBuf,
     vendor_link: PathBuf,
     reused: bool,
+    integrity: String,
+    integrity_check: Option<IntegrityCheck>,
 }
 
 pub(crate) struct PackageArchive<'a> {
     pub version: &'a str,
     pub dist_url: &'a str,
+    pub expected_integrity: Option<&'a str>,
+    pub expected_shasum: Option<&'a str>,
+    pub unsafe_trust_store: bool,
 }
 
 impl PackageSource {
@@ -32,24 +36,51 @@ impl PackageSource {
     pub(crate) fn is_reused(&self) -> bool {
         self.reused
     }
+
+    pub(crate) fn integrity(&self) -> &str {
+        &self.integrity
+    }
+
+    pub(crate) fn integrity_check(&self) -> Option<IntegrityCheck> {
+        self.integrity_check
+    }
 }
 
 pub(crate) fn prepare_source(
     package_name: &str,
     archive: PackageArchive<'_>,
 ) -> Result<PackageSource> {
-    let paths = package_paths(package_name, archive.version)?;
+    let base_paths = package_base_paths(package_name, archive.version)?;
 
-    let (path, reused) = match existing_source(&paths)? {
-        Some(source) => (source, true),
-        None => (download_and_publish_source(archive, &paths)?, false),
+    let (path, integrity, reused, integrity_check) = match archive.expected_integrity {
+        Some(expected_integrity) => {
+            let paths = package_paths(&base_paths, expected_integrity)?;
+            match existing_source(&paths, archive.unsafe_trust_store)? {
+                Some((source, check)) => {
+                    (source, expected_integrity.to_string(), true, Some(check))
+                }
+                None => {
+                    let (source, integrity, check) =
+                        download_and_publish_source(archive, &base_paths)?;
+
+                    (source, integrity, false, Some(check))
+                }
+            }
+        }
+        None => {
+            let (source, integrity, check) = download_and_publish_source(archive, &base_paths)?;
+
+            (source, integrity, false, Some(check))
+        }
     };
 
     Ok(PackageSource {
         package_name: package_name.to_string(),
         path,
-        vendor_link: paths.vendor_link,
+        vendor_link: base_paths.vendor_link,
         reused,
+        integrity,
+        integrity_check,
     })
 }
 
@@ -99,63 +130,75 @@ pub(crate) fn link_to_vendor(source: &PackageSource) -> Result<()> {
     })
 }
 
-fn package_paths(package_name: &str, version: &str) -> Result<PackagePaths> {
-    let (vendor, name) = package_path_parts(package_name).map_err(|error| {
-        ConcertoError::store(package_name, StoreStep::Prepare, error.to_string())
-    })?;
-    let store = PathBuf::from(".concerto/store")
-        .join(vendor)
-        .join(name)
-        .join(version);
-    let vendor_parent = PathBuf::from("vendor").join(vendor);
-    let vendor_link = vendor_parent.join(name);
-
-    Ok(PackagePaths {
-        package_name: package_name.to_string(),
-        zip: store.join("package.zip"),
-        published_source: store.join("source"),
-        staged_source: store.join("source.tmp"),
-        store,
-        vendor_link,
-    })
-}
-
-impl PackagePaths {
-    fn package_name(&self) -> &str {
-        &self.package_name
-    }
-}
-
-fn existing_source(paths: &PackagePaths) -> Result<Option<PathBuf>> {
+fn existing_source(
+    paths: &PackagePaths,
+    unsafe_trust_store: bool,
+) -> Result<Option<(PathBuf, IntegrityCheck)>> {
     if !paths.published_source.exists() {
         return Ok(None);
     }
 
-    published_source_dir(paths).map(Some)
+    let check = if unsafe_trust_store {
+        verify_unsafe_trusted_store_marker(paths)?
+    } else {
+        verify_stored_integrity(paths)?
+    };
+
+    Ok(Some((published_source_dir(paths)?, check)))
 }
 
 fn download_and_publish_source(
     archive: PackageArchive<'_>,
-    paths: &PackagePaths,
-) -> Result<PathBuf> {
-    std::fs::create_dir_all(&paths.store).map_err(|error| {
+    base_paths: &PackageBasePaths,
+) -> Result<(PathBuf, String, IntegrityCheck)> {
+    std::fs::create_dir_all(&base_paths.version_store).map_err(|error| {
         ConcertoError::store(
-            paths.package_name(),
+            base_paths.package_name(),
             StoreStep::Prepare,
             format!("could not create package store directory: {error}"),
         )
     })?;
 
-    download_to_file(archive.dist_url, &paths.zip).map_err(|error| {
+    download_to_file(archive.dist_url, &base_paths.download_zip).map_err(|error| {
         ConcertoError::store_with_hint(
-            paths.package_name(),
+            base_paths.package_name(),
             StoreStep::Download,
             format!("archive {} failed: {error}", archive.dist_url),
             "Check the dist URL or retry the install.",
         )
     })?;
 
-    clean_staged_source(paths)?;
+    let (hashes, check) = match verify_downloaded_archive(base_paths, &archive) {
+        Ok(verified) => verified,
+        Err(error) => {
+            let _ = remove_downloaded_archive(base_paths);
+            return Err(error);
+        }
+    };
+    let paths = package_paths(base_paths, &hashes.integrity)?;
+
+    std::fs::create_dir_all(&paths.content_store).map_err(|error| {
+        ConcertoError::store(
+            paths.package_name(),
+            StoreStep::Prepare,
+            format!("could not create package content store directory: {error}"),
+        )
+    })?;
+
+    if paths.published_source.exists() {
+        if archive.unsafe_trust_store {
+            verify_unsafe_trusted_store_marker(&paths)?;
+        } else {
+            verify_stored_integrity(&paths)?;
+        }
+        remove_downloaded_archive(base_paths)?;
+
+        return Ok((published_source_dir(&paths)?, hashes.integrity, check));
+    }
+
+    publish_downloaded_archive(base_paths, &paths)?;
+
+    clean_staged_source(&paths)?;
 
     safe_unzip::extract_file(&paths.staged_source, &paths.zip).map_err(|error| {
         ConcertoError::store_with_hint(
@@ -166,13 +209,7 @@ fn download_and_publish_source(
         )
     })?;
 
-    // Published sources may be shared by vendor links, so never delete them.
-    if paths.published_source.exists() {
-        clean_staged_source(paths)?;
-
-        return published_source_dir(paths);
-    }
-
+    write_integrity(&paths)?;
     std::fs::rename(&paths.staged_source, &paths.published_source).map_err(|error| {
         ConcertoError::store(
             paths.package_name(),
@@ -181,9 +218,9 @@ fn download_and_publish_source(
         )
     })?;
 
-    let source = published_source_dir(paths)?;
+    let source = published_source_dir(&paths)?;
 
-    Ok(source)
+    Ok((source, hashes.integrity, check))
 }
 
 fn clean_staged_source(paths: &PackagePaths) -> Result<()> {
@@ -232,6 +269,40 @@ fn only_child_dir(path: &Path, package_name: &str) -> Result<PathBuf> {
             ),
         )),
     }
+}
+
+fn publish_downloaded_archive(base_paths: &PackageBasePaths, paths: &PackagePaths) -> Result<()> {
+    if paths.zip.exists() {
+        std::fs::remove_file(&paths.zip).map_err(|error| {
+            ConcertoError::store(
+                paths.package_name(),
+                StoreStep::Publish,
+                format!("could not replace package archive: {error}"),
+            )
+        })?;
+    }
+
+    std::fs::rename(&base_paths.download_zip, &paths.zip).map_err(|error| {
+        ConcertoError::store(
+            paths.package_name(),
+            StoreStep::Publish,
+            format!("could not publish package archive: {error}"),
+        )
+    })
+}
+
+fn remove_downloaded_archive(base_paths: &PackageBasePaths) -> Result<()> {
+    if !base_paths.download_zip.exists() {
+        return Ok(());
+    }
+
+    std::fs::remove_file(&base_paths.download_zip).map_err(|error| {
+        ConcertoError::store(
+            base_paths.package_name(),
+            StoreStep::Prepare,
+            format!("could not clean downloaded archive: {error}"),
+        )
+    })
 }
 
 fn absolute_path(path: PathBuf) -> Result<PathBuf> {

@@ -4,7 +4,8 @@
       {
         "version": "3.0.2",
         "dist": {
-          "url": "__ARCHIVE_BASE_URL__/psr-log-3.0.2.zip"
+          "url": "__ARCHIVE_BASE_URL__/psr-log-3.0.2.zip",
+          "shasum": "d1b237d28598c3eecb03447d38b3bc30b4baac44"
         },
         "require": {
           "php": ">=8.0"

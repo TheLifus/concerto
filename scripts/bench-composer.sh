@@ -14,6 +14,7 @@ TOTAL_COMPOSER_WARM_MS=0
 TOTAL_CONCERTO_COLD_MS=0
 TOTAL_CONCERTO_LOCK_MS=0
 TOTAL_CONCERTO_RELINK_MS=0
+TOTAL_CONCERTO_TRUST_RELINK_MS=0
 
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -68,6 +69,7 @@ composer_install() {
 
 concerto_install() {
     local project="$1"
+    shift
 
     docker run --rm \
         --user "$(id -u):$(id -g)" \
@@ -75,7 +77,8 @@ concerto_install() {
         --workdir /app \
         --env CONCERTO_DEBUG_PERF=1 \
         "$CONCERTO_IMAGE" \
-        install
+        install \
+        "$@"
 }
 
 package_count() {
@@ -114,6 +117,7 @@ track_case() {
     local concerto_cold_ms="$4"
     local concerto_lock_ms="$5"
     local concerto_relink_ms="$6"
+    local concerto_unsafe_relink_ms="$7"
 
     CASE_COUNT=$((CASE_COUNT + 1))
     TOTAL_PACKAGES=$((TOTAL_PACKAGES + packages))
@@ -122,6 +126,7 @@ track_case() {
     TOTAL_CONCERTO_COLD_MS=$((TOTAL_CONCERTO_COLD_MS + concerto_cold_ms))
     TOTAL_CONCERTO_LOCK_MS=$((TOTAL_CONCERTO_LOCK_MS + concerto_lock_ms))
     TOTAL_CONCERTO_RELINK_MS=$((TOTAL_CONCERTO_RELINK_MS + concerto_relink_ms))
+    TOTAL_CONCERTO_TRUST_RELINK_MS=$((TOTAL_CONCERTO_TRUST_RELINK_MS + concerto_unsafe_relink_ms))
 }
 
 bench_case() {
@@ -138,6 +143,7 @@ bench_case() {
     local concerto_cold_ms
     local concerto_lock_ms
     local concerto_relink_ms
+    local concerto_unsafe_relink_ms
     local packages
     local cold_result
     local lock_result
@@ -149,6 +155,8 @@ bench_case() {
 
     rm -rf "$concerto_project/vendor"
     concerto_relink_ms="$(timed concerto_install "$concerto_project")"
+    rm -rf "$concerto_project/vendor"
+    concerto_unsafe_relink_ms="$(timed concerto_install "$concerto_project" --unsafe-trust-store)"
     packages="$(package_count "$concerto_project")"
     cold_result="$(compare_time "$composer_cold_ms" "$concerto_cold_ms")"
     lock_result="$(compare_time "$composer_warm_ms" "$concerto_lock_ms")"
@@ -159,9 +167,10 @@ bench_case() {
         "$composer_warm_ms" \
         "$concerto_cold_ms" \
         "$concerto_lock_ms" \
-        "$concerto_relink_ms"
+        "$concerto_relink_ms" \
+        "$concerto_unsafe_relink_ms"
 
-    printf '%-16s %8s %13s %13s %13s %13s %15s %-14s %-14s\n' \
+    printf '%-16s %8s %13s %13s %13s %13s %15s %15s %-14s %-14s\n' \
         "$name" \
         "$packages" \
         "$composer_cold_ms" \
@@ -169,6 +178,7 @@ bench_case() {
         "$concerto_cold_ms" \
         "$concerto_lock_ms" \
         "$concerto_relink_ms" \
+        "$concerto_unsafe_relink_ms" \
         "$cold_result" \
         "$lock_result"
 }
@@ -186,6 +196,7 @@ print_summary() {
     local avg_concerto_cold
     local avg_concerto_lock
     local avg_concerto_relink
+    local avg_concerto_unsafe_relink
 
     avg_packages="$(average "$TOTAL_PACKAGES")"
     avg_composer_cold="$(average "$TOTAL_COMPOSER_COLD_MS")"
@@ -193,6 +204,7 @@ print_summary() {
     avg_concerto_cold="$(average "$TOTAL_CONCERTO_COLD_MS")"
     avg_concerto_lock="$(average "$TOTAL_CONCERTO_LOCK_MS")"
     avg_concerto_relink="$(average "$TOTAL_CONCERTO_RELINK_MS")"
+    avg_concerto_unsafe_relink="$(average "$TOTAL_CONCERTO_TRUST_RELINK_MS")"
 
     echo
     echo "Average over $CASE_COUNT cases ($avg_packages packages average):"
@@ -205,6 +217,7 @@ print_summary() {
         "$avg_concerto_lock" \
         "$avg_composer_warm"
     printf '  Vendor relink: Concerto averages %sms.\n' "$avg_concerto_relink"
+    printf '  Unsafe trusted relink: Concerto averages %sms.\n' "$avg_concerto_unsafe_relink"
 }
 
 command -v docker >/dev/null || {
@@ -223,7 +236,7 @@ docker build \
 
 echo "Composer and Concerto run in Docker with $COMPOSER_IMAGE."
 echo "Composer runs with --ignore-platform-reqs."
-printf '%-16s %8s %13s %13s %13s %13s %15s %-14s %-14s\n' \
+printf '%-16s %8s %13s %13s %13s %13s %15s %15s %-14s %-14s\n' \
     "case" \
     "packages" \
     "composer_cold" \
@@ -231,6 +244,7 @@ printf '%-16s %8s %13s %13s %13s %13s %15s %-14s %-14s\n' \
     "concerto_cold" \
     "concerto_lock" \
     "concerto_relink" \
+    "concerto_unsafe" \
     "cold_result" \
     "lock_result"
 

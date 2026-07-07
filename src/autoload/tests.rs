@@ -102,6 +102,8 @@ fn package(name: &str, package_requires: &[RequiredPackage]) -> LockedPackage {
         name: name.to_string(),
         version: "1.0.0".to_string(),
         dist_url: "https://example.com/package.zip".to_string(),
+        dist_integrity: Some("blake3:test".to_string()),
+        dist_shasum: None,
         dev: false,
         package_requires: package_requires.to_vec(),
         platform_requires: Vec::new(),

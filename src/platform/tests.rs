@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn accepts_matching_php_requirement() {
@@ -150,11 +151,142 @@ fn accepts_platform_requirement_name_case_insensitively() {
     assert!(result.is_ok());
 }
 
+#[test]
+fn detects_when_extension_metadata_is_needed() {
+    assert!(!needs_extension_metadata(&[required_package(
+        "php", ">=8.1"
+    )]));
+    assert!(needs_extension_metadata(&[required_package(
+        "ext-json", "*"
+    )]));
+    assert!(needs_extension_metadata(&[required_package(
+        "Ext-JSON", "*"
+    )]));
+}
+
+#[test]
+fn parses_php_version_only_output() {
+    let platform = parse_platform("8.3.1\n").unwrap();
+
+    assert_eq!(platform.php_version, "8.3.1");
+    assert!(platform.extensions.is_empty());
+    assert!(platform.extension_versions.is_empty());
+}
+
+#[test]
+fn caches_php_and_full_platform_slots_independently() {
+    let dir = temp_dir("platform-cache-slots");
+    let cache_path = dir.join("platform-php.json");
+    let key = cache_key("php-a");
+    let php_platform = platform("8.3.1", &[]);
+    let full_platform = platform("8.3.1", &["json"]);
+
+    write_cached_platform_to(
+        &cache_path,
+        PlatformCacheSlot::Php,
+        key.clone(),
+        &php_platform,
+    )
+    .unwrap();
+    write_cached_platform_to(
+        &cache_path,
+        PlatformCacheSlot::Full,
+        key.clone(),
+        &full_platform,
+    )
+    .unwrap();
+
+    assert_eq!(
+        read_cached_platform_from(&cache_path, PlatformCacheSlot::Php, &key).unwrap(),
+        Some(php_platform)
+    );
+    assert_eq!(
+        read_cached_platform_from(&cache_path, PlatformCacheSlot::Full, &key).unwrap(),
+        Some(full_platform)
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ignores_platform_cache_when_key_differs() {
+    let dir = temp_dir("platform-cache-miss");
+    let cache_path = dir.join("platform-php.json");
+
+    write_cached_platform_to(
+        &cache_path,
+        PlatformCacheSlot::Php,
+        cache_key("php-a"),
+        &platform("8.3.1", &[]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        read_cached_platform_from(&cache_path, PlatformCacheSlot::Php, &cache_key("php-b"))
+            .unwrap(),
+        None
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ignores_invalid_platform_cache() {
+    let dir = temp_dir("platform-cache-invalid");
+    let cache_path = dir.join("platform-php.json");
+
+    std::fs::write(&cache_path, "not json").unwrap();
+
+    assert_eq!(
+        read_cached_platform_from(&cache_path, PlatformCacheSlot::Php, &cache_key("php-a"))
+            .unwrap(),
+        None
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn builds_platform_cache_key_from_file_metadata() {
+    let dir = temp_dir("platform-cache-key");
+    let php = dir.join("php");
+
+    std::fs::write(&php, "fake php").unwrap();
+
+    let key = platform_cache_key(&php).unwrap();
+
+    assert!(key.path.ends_with("php"));
+    assert_eq!(key.len, "fake php".len() as u64);
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn required_package(name: &str, constraint: &str) -> RequiredPackage {
     RequiredPackage {
         name: name.to_string(),
         constraint: constraint.to_string(),
     }
+}
+
+fn cache_key(path: &str) -> PlatformCacheKey {
+    PlatformCacheKey {
+        path: path.to_string(),
+        len: 1,
+        modified_secs: 2,
+        modified_nanos: 3,
+    }
+}
+
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("concerto-{name}-{nanos}"));
+
+    std::fs::create_dir_all(&path).unwrap();
+
+    path
 }
 
 fn platform(php_version: &str, extensions: &[&str]) -> Platform {
