@@ -47,7 +47,7 @@ jobs:
         run: cargo test --locked
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.82.10
+        uses: taiki-e/install-action@v2.83.0
         with:
           tool: cargo-deny@0.19.9
           fallback: none
@@ -75,7 +75,7 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.82.10
+        uses: taiki-e/install-action@v2.83.0
         with:
           tool: cargo-llvm-cov@0.8.7
           fallback: none
